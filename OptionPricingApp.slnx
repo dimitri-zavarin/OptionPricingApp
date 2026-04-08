@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="OptionPricingApp/OptionPricingApp.vcxproj" />
+  <Project Path="OptionPricingApp/OptionPricingApp.vcxproj" Id="1c3f58f3-a95a-4fb2-a880-c97a5c48bbe0" />
 </Solution>
