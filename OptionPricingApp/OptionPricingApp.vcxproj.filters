@@ -18,18 +18,21 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="pricer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="option.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="pricer.h">
+    <ClInclude Include="binomial.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="option.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="greeks.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="black_scholes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="market_data.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

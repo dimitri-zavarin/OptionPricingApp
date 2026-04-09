@@ -128,12 +128,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="option.cpp" />
-    <ClCompile Include="pricer.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="black_scholes.h" />
+    <ClInclude Include="greeks.h" />
+    <ClInclude Include="market_data.h" />
     <ClInclude Include="option.h" />
-    <ClInclude Include="pricer.h" />
+    <ClInclude Include="binomial.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

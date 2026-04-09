@@ -23,6 +23,7 @@ public:
 	double K; // strike price
 	double T; // time to maturity
 
+	using Payoff = PayoffType;
 	using Exercise = ExerciseType;
 
 	Option(double strike, double maturity) : K(strike), T(maturity) {}
