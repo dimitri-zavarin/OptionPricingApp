@@ -35,5 +35,8 @@
     <ClInclude Include="market_data.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="implied_vol.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

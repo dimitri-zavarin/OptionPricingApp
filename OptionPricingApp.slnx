@@ -1,7 +1,12 @@
 <Solution>
   <Configurations>
+    <Platform Name="Any CPU" />
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="MarketDataFetcher/MarketDataFetcher.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="2e5c2e20-d7db-4997-b64d-d1d01f91ad7e">
+    <Platform Project="AnyCPU" />
+    <Build Project="false" />
+  </Project>
   <Project Path="OptionPricingApp/OptionPricingApp.vcxproj" Id="1c3f58f3-a95a-4fb2-a880-c97a5c48bbe0" />
 </Solution>

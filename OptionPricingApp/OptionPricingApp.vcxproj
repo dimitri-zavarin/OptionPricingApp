@@ -132,6 +132,7 @@
   <ItemGroup>
     <ClInclude Include="black_scholes.h" />
     <ClInclude Include="greeks.h" />
+    <ClInclude Include="implied_vol.h" />
     <ClInclude Include="market_data.h" />
     <ClInclude Include="option.h" />
     <ClInclude Include="binomial.h" />
