@@ -1,60 +1,76 @@
 #pragma once
 
+#include "market_data.h"
 #include "binomial.h"
 
-struct GreeksConfig {
-	double S_factor = 0.01;		// shift factor for stock price
-	double sigma_factor = 0.01;	// shift factor for volatility
+template <typename OptionType, template <typename> typename PricerType>
+struct Delta {
+	static double calculate(MarketData mkt, const OptionType& opt, int steps, double shift = 0.01) {
+		double dS = mkt.S0 * shift;
+
+		mkt.S0 += dS;
+		double up_price = PricerType<OptionType>::price(mkt, opt, steps);
+
+		mkt.S0 -= 2.0 * dS;
+		double down_price = PricerType<OptionType>::price(mkt, opt, steps);
+
+		// central difference approximation
+		// f'(x) = (f(x+h) - f(x-h)) / 2h
+
+		return (up_price - down_price) / (2.0 * dS);
+	}
 };
 
 template <typename OptionType, template <typename> typename PricerType>
-struct Greeks {
-	struct Values {
-		double delta;
-		double gamma;
-		double vega;
-	};
+struct Gamma {
+	static double calculate(MarketData mkt, const OptionType& opt, int steps, double shift = 0.01) {
+		double dS = mkt.S0 * shift;
+		double price = PricerType<OptionType>::price(mkt, opt, steps);
 
-	static Values calculate(const MarketData& data, const OptionType& opt, int steps, const GreeksConfig& config = GreeksConfig()) {
-		double S = data.S0;
-		double sigma = data.sigma;
-		double dS = S * config.S_factor;
-		double dsigma = sigma * config.sigma_factor;
+		mkt.S0 += dS;
+		double up_price = PricerType<OptionType>::price(mkt, opt, steps);
 
-		double opt_price = PricerType<OptionType>::price(data, opt, steps);
+		mkt.S0 -= 2.0 * dS;
+		double down_price = PricerType<OptionType>::price(mkt, opt, steps);
 
-		// Option price if stock price bumped up
-		MarketData S_up = data;
-		S_up.S0 = S + dS;
-		double opt_S_up = PricerType<OptionType>::price(S_up, opt, steps);
+		// central difference approximation
+		// f''(x) = (f(x+h) - 2f(x) + f(x-h)) / h^2
 
-		// Option price if stock price bumped down
-		MarketData S_down = data;
-		S_down.S0 = S - dS;
-		double opt_S_down = PricerType<OptionType>::price(S_down, opt, steps);
+		return (up_price - 2.0 * price + down_price) / (dS * dS);
+	}
+};
 
-		// Option price if volatility bumped up
-		MarketData sigma_up = data;
-		sigma_up.sigma = sigma + dsigma;
-		double opt_sigma_up = PricerType<OptionType>::price(sigma_up, opt, steps);
+template <typename OptionType, template <typename> typename PricerType>
+struct Vega {
+	static double calculate(MarketData mkt, const OptionType& opt, int steps, double shift = 0.01) {
+		double dSigma = mkt.sigma * shift;
+		if (dSigma < 1e-10) { dSigma = 1e-4; }
 
-		// Option price if volatility bumped down
-		MarketData sigma_down = data;
-		sigma_down.sigma = sigma - dsigma;
-		double opt_sigma_down = PricerType<OptionType>::price(sigma_down, opt, steps);
+		mkt.sigma += dSigma;
+		double up_price = PricerType<OptionType>::price(mkt, opt, steps);
 
-		// Approximate Greeks via central difference
-		Values results;
+		mkt.sigma -= 2.0 * dSigma;
+		double down_price = PricerType<OptionType>::price(mkt, opt, steps);
 
-		// d(option price) / d(stock price)
-		results.delta = (opt_S_up - opt_S_down) / (2.0 * dS);
+		// central difference approximation
+		// f'(x) = (f(x+h) - f(x-h)) / 2h
 
-		// d^2(option price) / d(stock price)^2
-		results.gamma = (opt_S_up - 2.0 * opt_price + opt_S_down) / (dS * dS);
+		return (up_price - down_price) / (2.0 * dSigma);
+	}
+};
 
-		// d(option price) / d(volatility)
-		results.vega = (opt_sigma_up - opt_sigma_down) / (2.0 * dsigma); 
+template <typename OptionType, template <typename> typename PricerType>
+struct Epsilon {
+	static double calculate(MarketData mkt, const OptionType& opt, int steps, double dq = 0.0001) {
+		mkt.q += dq;
+		double up_price = PricerType<OptionType>::price(mkt, opt, steps);
 
-		return results;
+		mkt.q -= 2.0 * dq;
+		double down_price = PricerType<OptionType>::price(mkt, opt, steps);
+
+		// central difference approximation
+		// f'(x) = (f(x+h) - f(x-h)) / 2h
+
+		return (up_price - down_price) / (2.0 * dq);
 	}
 };

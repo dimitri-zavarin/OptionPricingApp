@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <type_traits>
 #include "option.h"
 #include "market_data.h"
 
@@ -9,7 +10,10 @@ inline double norm_cdf(double x) {
 	return 0.5 * (1 + std::erf(x / std::sqrt(2.0)));
 }
 
-template <typename OptionType>
+template <typename T>
+concept EuropeanOption = std::is_same_v<typename T::Exercise, European>;
+
+template <EuropeanOption OptionType>
 struct BlackScholesPricer {
     using PayoffType = typename OptionType::Payoff;
 

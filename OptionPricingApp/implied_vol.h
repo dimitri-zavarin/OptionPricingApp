@@ -29,7 +29,7 @@ struct IVSolver {
 
             if (std::abs(diff) < config.tol) { return sigma; }
 
-            double vega = Greeks<OptionType, PricerType>::calculate(mkt, opt, config.steps).vega;
+            double vega = Vega<OptionType, PricerType>::calculate(mkt, opt, config.steps);
 
             if (std::abs(vega) < 1e-10) { break; }
 
