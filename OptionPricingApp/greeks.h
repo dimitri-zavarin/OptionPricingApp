@@ -5,12 +5,12 @@
 
 // Flags for each Greek
 enum GreekFlags {
-	G_DELTA = 1 << 0, // 00001
-	G_GAMMA = 1 << 1, // 00010
-	G_VEGA = 1 << 2, // 00100
-	G_THETA = 1 << 3, // 01000
+	G_DELTA = 1 << 0,	// 00001
+	G_GAMMA = 1 << 1,	// 00010
+	G_VEGA = 1 << 2,	// 00100
+	G_THETA = 1 << 3,	// 01000
 	G_EPSILON = 1 << 4, // 10000
-	G_ALL = 0x1F    // 11111
+	G_ALL = 0x1F		// 11111
 };
 
 struct GreekValues {
@@ -21,11 +21,10 @@ template <typename OptionType, template <typename> typename PricerType>
 struct GreeksSuite {
 	static GreekValues calculate(MarketData mkt, const OptionType& opt, int steps, int requested_greeks = G_ALL) {
 		GreekValues values;
-
 		double cur_price = 0.0;
-		bool cur_price_needed = (requested_greeks & (G_GAMMA | G_THETA));
 
-		if (cur_price_needed) {
+		// Calculate current price ahead of time if needed for gamma or theta
+		if (requested_greeks & (G_GAMMA | G_THETA) {
 			cur_price = PricerType<OptionType>::price(mkt, opt, steps);
 		}
 
@@ -130,7 +129,7 @@ struct Theta {
 		double future_price = PricerType<OptionType>::price(mkt, opt, steps);
 
 		// backward difference approximation (time to maturity decreases at time goes forward)
-		// f'(x) = (f(T-dt)-f(T))/dt
+		// f'(T) = (f(T-dt)-f(T))/dt
 		double annualized_theta = (future_price - cur_price) / dt;
 
 		// Return a one-day scaled theta

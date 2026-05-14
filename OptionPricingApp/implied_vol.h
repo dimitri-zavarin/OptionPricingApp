@@ -35,7 +35,7 @@ struct IVSolver {
 
             sigma -= diff / vega;
 
-            if (sigma <= 0) { sigma = 1e-4; }
+            if (sigma <= 0) { sigma = 1e-6; }
             if (sigma > 4.0) { sigma = 4.0; }
         }
 
