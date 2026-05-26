@@ -18,41 +18,6 @@ struct GreekValues {
 };
 
 template <typename OptionType, template <typename> typename PricerType>
-struct GreeksSuite {
-	static GreekValues calculate(MarketData mkt, const OptionType& opt, int steps, int requested_greeks = G_ALL) {
-		GreekValues values;
-		double cur_price = 0.0;
-
-		// Calculate current price ahead of time if needed for gamma or theta
-		if (requested_greeks & (G_GAMMA | G_THETA) {
-			cur_price = PricerType<OptionType>::price(mkt, opt, steps);
-		}
-
-		if (requested_greeks & G_DELTA) {
-			values.delta = Delta<OptionType, PricerType>::calculate(mkt, opt, steps);
-		}
-
-		if (requested_greeks & G_GAMMA) {
-			values.gamma = Gamma<OptionType, PricerType>::calculate(mkt, opt, steps, cur_price);
-		}
-
-		if (requested_greeks & G_VEGA) {
-			values.vega = Vega<OptionType, PricerType>::calculate(mkt, opt, steps);
-		}
-
-		if (requested_greeks & G_THETA) {
-			values.theta = Theta<OptionType, PricerType>::calculate(mkt, opt, steps, cur_price);
-		}
-
-		if (requested_greeks & G_EPSILON) {
-			values.epsilon = Epsilon<OptionType, PricerType>::calculate(mkt, opt, steps);
-		}
-
-		return values;
-	}
-};
-
-template <typename OptionType, template <typename> typename PricerType>
 struct Delta {
 	static double calculate(MarketData mkt, const OptionType& opt, int steps, double shift = 0.01) {
 		double dS = mkt.S0 * shift;
@@ -150,5 +115,40 @@ struct Epsilon {
 		// f'(x) = (f(x+h) - f(x-h)) / 2h
 
 		return (up_price - down_price) / (2.0 * dq);
+	}
+};
+
+template <typename OptionType, template <typename> typename PricerType>
+struct GreeksSuite {
+	static GreekValues calculate(MarketData mkt, const OptionType& opt, int steps, int requested_greeks = G_ALL) {
+		GreekValues values;
+		double cur_price = 0.0;
+
+		// Calculate current price ahead of time if needed for gamma or theta
+		if (requested_greeks & (G_GAMMA | G_THETA)) {
+			cur_price = PricerType<OptionType>::price(mkt, opt, steps);
+		}
+
+		if (requested_greeks & G_DELTA) {
+			values.delta = Delta<OptionType, PricerType>::calculate(mkt, opt, steps);
+		}
+
+		if (requested_greeks & G_GAMMA) {
+			values.gamma = Gamma<OptionType, PricerType>::calculate(mkt, opt, steps, cur_price);
+		}
+
+		if (requested_greeks & G_VEGA) {
+			values.vega = Vega<OptionType, PricerType>::calculate(mkt, opt, steps);
+		}
+
+		if (requested_greeks & G_THETA) {
+			values.theta = Theta<OptionType, PricerType>::calculate(mkt, opt, steps, cur_price);
+		}
+
+		if (requested_greeks & G_EPSILON) {
+			values.epsilon = Epsilon<OptionType, PricerType>::calculate(mkt, opt, steps);
+		}
+
+		return values;
 	}
 };

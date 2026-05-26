@@ -41,5 +41,11 @@
     <ClInclude Include="implied_div.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="network_monte_carlo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="config_loader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
