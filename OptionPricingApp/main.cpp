@@ -1,142 +1,116 @@
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <string>
-#include <iomanip>
-#include <cmath>
+#include <chrono>
+
 #include "market_data.h"
+#include "option.h"
 #include "config_loader.h"
 #include "network_monte_carlo.h"
-#include "option.h"
-#include "black_scholes.h"
 #include "implied_div.h"
+#include "black_scholes.h"
+#include "binomial.h"
+
+// Helper function to safely match contracts by ticker symbol
+VanillaOptionData match_contract(const std::string& target_ticker, const std::vector<VanillaOptionData>& contracts) {
+    for (const auto& contract : contracts) {
+        if (contract.ticker == target_ticker) {
+            return contract;
+        }
+    }
+    throw std::runtime_error("Calibration contract not found for ticker: " + target_ticker);
+}
 
 int main() {
     try {
-        std::cout << "=========================================================\n";
-        std::cout << "   INITIALIZING QUANTITATIVE FINANCE NETWORK ENGINE      \n";
-        std::cout << "   Framework: Mattera & Otto (2024) Network log-ARCH    \n";
-        std::cout << "=========================================================\n\n";
+        std::cout << "==================================================\n";
+        std::cout << " SPATIOTEMPORAL VOLATILITY NETWORK PRICER\n";
+        std::cout << "==================================================\n";
 
-        // Step 1: Initialize baseline multi-asset containers
-        std::vector<MarketData> market_universe;
+        // 1. Ingest the Macro Environment
+        std::vector<MarketData> universe;
         std::vector<std::string> tickers;
-        NetworkLogArchConfig log_arch_config;
-        log_arch_config.rho_global = 0.15;
+        NetworkLogArchConfig net_config;
 
-        // Vectors to temporarily hold option pricing bounds parsed from our data pipeline
-        std::vector<double> opt_strikes;
-        std::vector<double> opt_maturities;
-        std::vector<double> opt_target_prices;
+        std::cout << "[*] Loading Network Configurations...\n";
+        NetworkConfigLoader::load_system_config("network_config.csv", universe, tickers, net_config);
+        NetworkConfigLoader::load_weight_matrix("weight_matrix.csv", net_config);
 
-        // Change these lines in main.cpp to your absolute project folder:
-        std::string config_path = "C:\\Users\\Dimitri\\source\\repos\\OptionPricingApp\\OptionPricingApp\\network_config.csv";
-        std::string matrix_path = "C:\\Users\\Dimitri\\source\\repos\\OptionPricingApp\\OptionPricingApp\\weight_matrix.csv";
+        // 2. Ingest the Micro Calibration Contracts
+        std::cout << "[*] Loading Calibration Contracts...\n";
+        auto contracts = NetworkConfigLoader::load_calibration_options("calibration_options.csv");
 
-        // Step 2: Stream variables from the Python pipeline CSV artifacts
-        std::cout << "[INFO] Ingesting parameters from " << config_path << "...\n";
-        NetworkConfigLoader::load_system_config(config_path, market_universe, tickers, log_arch_config,
-            opt_strikes, opt_maturities, opt_target_prices);
+        // For this test, we will isolate the very first asset in the universe
+        size_t test_idx = 0;
+        std::string test_ticker = tickers[test_idx];
 
-        std::cout << "[INFO] Ingesting spatial topology matrix from " << matrix_path << "...\n";
-        NetworkConfigLoader::load_weight_matrix(matrix_path, log_arch_config);
+        // Match by ticker string
+        VanillaOptionData target_contract = match_contract(test_ticker, contracts);
 
-        size_t n_assets = tickers.size();
-        std::cout << "[SUCCESS] Adjacency matrix linked. Dimension: " << n_assets << " assets.\n\n";
+        std::cout << "\nTarget Asset: " << test_ticker << "\n";
+        std::cout << "Spot Price: $" << universe[test_idx].S0 << "\n";
+        std::cout << "Contract: Strike = $" << target_contract.strike
+            << ", TTM = " << target_contract.maturity << " yrs\n";
 
-        // Step 3: Run your Custom Template Implied Dividend Solver natively!
-        std::cout << "--- Launching C++ Template Implied Dividend Optimizations ---\n";
+        // 3. Setup the Option Object using your EuCall alias
+        EuCall test_option(target_contract.strike, target_contract.maturity);
 
-        IDivConfig solver_settings;
-        solver_settings.q = 0.015;     // Starting point guess for our Newton-Raphson loops
-        solver_settings.tol = 1e-6;     // Match your target precision bounds
-        solver_settings.steps = 0;      // Steps parameter not used by BlackScholesPricer, safely set to 0
+        // 4. Calibrate the Implied Dividend Yield
+        std::cout << "\n[*] Running Newton-Raphson Implied Dividend Calibration...\n";
+        double implied_q = IDivSolver<EuCall, BinomialPricer>::solve(
+            universe[test_idx], test_option, target_contract.targetPrice
+        );
+        universe[test_idx].q = implied_q;
+        std::cout << " -> Calibrated " << test_ticker << " Dividend Yield (q): "
+            << std::fixed << std::setprecision(4) << (implied_q * 100.0) << "%\n";
 
-        for (size_t i = 0; i < n_assets; ++i) {
-            std::cout << "  -> Calibrating option skew metrics for " << tickers[i] << "...\n";
+        // ==========================================
+        // THE PRICING SHOWDOWN
+        // ==========================================
+        std::cout << "\n==================================================\n";
+        std::cout << " PRICING ENGINE COMPARISON\n";
+        std::cout << "==================================================\n";
 
-            // Instantiate your exact policy-based option type class!
-            // Type definition: using EuCall = Option<CallPayoff, European>;
-            EuCall market_contract(opt_strikes[i], opt_maturities[i]);
+        // Engine 1: Black-Scholes (Closed Form)
+        double bs_price = BlackScholesPricer<EuCall>::price(universe[test_idx], test_option);
+        std::cout << std::left << std::setw(30) << "[1] Black-Scholes (Constant Vol):"
+            << "$" << bs_price << "\n";
 
-            // Invoke your exact IDivSolver template signature using your analytical BlackScholesPricer engine!
-            double calibrated_q = IDivSolver<EuCall, BlackScholesPricer>::solve(
-                market_universe[i],
-                market_contract,
-                opt_target_prices[i],
-                solver_settings
-            );
+        // Engine 2: Binomial Tree (Discrete Space)
+        int tree_steps = 1000;
+        double binom_price = BinomialPricer<EuCall>::price(universe[test_idx], test_option, tree_steps);
+        std::cout << std::left << std::setw(30) << "[2] Binomial Tree (1000 steps):"
+            << "$" << binom_price << "\n";
 
-            // Save the verified yield straight into our asset profile drift struct
-            market_universe[i].q = calibrated_q;
+        // Engine 3: Spatiotemporal Network Monte Carlo (Stochastic Vol)
+        std::cout << "\n[*] Initializing Network Monte Carlo Engine...\n";
+        NetworkMonteCarloPricer mc_pricer(universe, net_config);
 
-            std::cout << "     * Target Exchange Price: $" << opt_target_prices[i]
-                << " -> Calibrated Implied q = " << std::fixed << std::setprecision(4) << calibrated_q * 100.0 << "%\n";
-        }
-        std::cout << "[SUCCESS] Multi-asset drift channels are risk-neutralized.\n\n";
-
-        // Display an operational state summary to the output console terminal
-        std::cout << "-----------------------------------------------------------------------\n";
-        std::cout << std::left << std::setw(10) << "Ticker"
-            << std::setw(12) << "Spot S0"
-            << std::setw(12) << "Risk-Free r"
-            << std::setw(14) << "Calibrated q"
-            << std::setw(12) << "Initial IV" << "\n";
-        std::cout << "-----------------------------------------------------------------------\n";
-        for (size_t i = 0; i < n_assets; ++i) {
-            std::cout << std::left << std::setw(10) << tickers[i]
-                << "$" << std::setw(11) << std::fixed << std::setprecision(2) << market_universe[i].S0
-                << std::setw(12) << std::setprecision(4) << market_universe[i].r
-                << std::setw(14) << market_universe[i].q * 100.0
-                << std::setw(12) << market_universe[i].sigma << "\n";
-        }
-        std::cout << "-----------------------------------------------------------------------\n\n";
-
-        // Step 4: Define the Option Payoff Logic (Arithmetic Average Basket Option)
-        double sum_initial_spots = 0.0;
-        for (size_t i = 0; i < n_assets; ++i) {
-            sum_initial_spots += market_universe[i].S0;
-        }
-        double basket_spot_average = sum_initial_spots / static_cast<double>(n_assets);
-
-        double strike_K = basket_spot_average; // Dynamically binds the strike at-the-money (~$491.78)
-        double maturity = 1.0;
-        size_t time_steps = 252;
-        size_t simulations = 100000;
-
-        std::cout << "--- Configuring Basket Option Specification ---\n";
-        std::cout << "  * Type:                 Arithmetic Average Call\n";
-        std::cout << "  * Strike (K):          " << strike_K << "\n";
-        std::cout << "  * Maturity (T):         " << maturity << " Year\n";
-        std::cout << "  * Step Granularity:     " << time_steps << " (Daily increments)\n";
-        std::cout << "  * Simulation Iterations: " << simulations << "\n\n";
-
-        auto basket_call_payoff = [strike_K, n_assets](const std::vector<double>& S_T) -> double {
-            double sum_prices = 0.0;
-            for (size_t i = 0; i < n_assets; ++i) {
-                sum_prices += S_T[i];
-            }
-            double basket_average = sum_prices / static_cast<double>(n_assets);
-            double value = basket_average - strike_K;
-            return (value > 0.0) ? value : 0.0;
+        // Define a Lambda Payoff that isolates only our test asset
+        double K = target_contract.strike;
+        auto single_asset_payoff = [K, test_idx](const std::vector<double>& S_T) {
+            return std::max(S_T[test_idx] - K, 0.0);
             };
 
-        // Step 5: Initialize the Pricing Module and Launch Monte Carlo Paths
-        std::cout << "[INFO] Initializing system matrix inversion (I - rho*W)^-1...\n";
-        NetworkMonteCarloPricer pricer(market_universe, log_arch_config);
+        size_t num_sims = 50000;
+        size_t trading_days = static_cast<size_t>(std::round(target_contract.maturity * 252));
 
-        std::cout << "[RUNNING] Simulating joint spatiotemporal risk diffusion paths...\n";
-        double final_option_price = pricer.price_basket_option(simulations, maturity, time_steps, basket_call_payoff);
+        auto start_time = std::chrono::high_resolution_clock::now();
+        double mc_price = mc_pricer.price_basket_option(num_sims, target_contract.maturity, trading_days, single_asset_payoff);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> mc_duration = end_time - start_time;
 
-        std::cout << "\n=========================================================\n";
-        std::cout << "   SIMULATION PRICING RESULTS                            \n";
-        std::cout << "=========================================================\n";
-        std::cout << "   Network Option Value:  $" << std::fixed << std::setprecision(4) << final_option_price << "\n";
-        std::cout << "=========================================================\n";
+        std::cout << std::left << std::setw(30) << "[3] Network Monte Carlo:"
+            << "$" << mc_price << " (" << num_sims << " paths, " << mc_duration.count() << " sec)\n";
+
+        std::cout << "==================================================\n";
 
     }
     catch (const std::exception& e) {
-        std::cerr << "\n[CRITICAL ERROR EXCEPTION ACCESSED]: " << e.what() << "\n";
+        std::cerr << "\n[FATAL ERROR] " << e.what() << "\n";
         return 1;
     }
+
     return 0;
 }
