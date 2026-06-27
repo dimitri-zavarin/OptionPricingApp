@@ -1,116 +1,75 @@
 #include <iostream>
-#include <iomanip>
-#include <vector>
-#include <string>
-#include <chrono>
+#include <Eigen/Dense>
+#include "simulation_config.h"
+#include "network_simulator.h"
+#include "network_pricers.h"
 
-#include "market_data.h"
-#include "option.h"
-#include "config_loader.h"
-#include "network_monte_carlo.h"
-#include "implied_div.h"
-#include "black_scholes.h"
-#include "binomial.h"
-
-// Helper function to safely match contracts by ticker symbol
-VanillaOptionData match_contract(const std::string& target_ticker, const std::vector<VanillaOptionData>& contracts) {
-    for (const auto& contract : contracts) {
-        if (contract.ticker == target_ticker) {
-            return contract;
-        }
-    }
-    throw std::runtime_error("Calibration contract not found for ticker: " + target_ticker);
+// Templated execution wrapper
+template <typename PricerType>
+Eigen::VectorXd executePricing(const PricerType& pricer, double strike, bool is_call) {
+    return pricer.price(strike, is_call);
 }
 
 int main() {
-    try {
-        std::cout << "==================================================\n";
-        std::cout << " SPATIOTEMPORAL VOLATILITY NETWORK PRICER\n";
-        std::cout << "==================================================\n";
+    std::cout << "--- Initializing Synthetic 3-Asset Heston Network ---" << std::endl;
 
-        // 1. Ingest the Macro Environment
-        std::vector<MarketData> universe;
-        std::vector<std::string> tickers;
-        NetworkLogArchConfig net_config;
+    SimulationConfig config;
 
-        std::cout << "[*] Loading Network Configurations...\n";
-        NetworkConfigLoader::load_system_config("network_config.csv", universe, tickers, net_config);
-        NetworkConfigLoader::load_weight_matrix("weight_matrix.csv", net_config);
+    // 1. Core Dimensions & Market Data
+    config.num_assets = 3;
+    config.num_paths = 50000;      // 50k paths for stable Monte Carlo convergence
+    config.num_steps = 252;        // 1 Year to maturity
+    config.dt = 1.0 / 252.0;       // Daily time steps
+    config.risk_free_rate = 0.05;  // 5% interest rate
 
-        // 2. Ingest the Micro Calibration Contracts
-        std::cout << "[*] Loading Calibration Contracts...\n";
-        auto contracts = NetworkConfigLoader::load_calibration_options("calibration_options.csv");
+    // 2. Initialize N-Dimensional Vectors
+    config.S0 = Eigen::VectorXd::Constant(config.num_assets, 100.0); // All start at $100
+    config.q = Eigen::VectorXd::Zero(config.num_assets);             // No dividends for simplicity
 
-        // For this test, we will isolate the very first asset in the universe
-        size_t test_idx = 0;
-        std::string test_ticker = tickers[test_idx];
+    // 3. Spatiotemporal Heston Parameters
+    config.kappa = Eigen::VectorXd::Constant(config.num_assets, 2.0);   // Mean-reversion speed
+    config.theta = Eigen::VectorXd::Constant(config.num_assets, -2.0);  // Baseline target
+    config.gamma = Eigen::VectorXd::Constant(config.num_assets, 0.5);   // Network spillover intensity
+    config.xi = Eigen::VectorXd::Constant(config.num_assets, 0.3);      // Volatility of volatility
+    config.rho = Eigen::VectorXd::Constant(config.num_assets, -0.7);    // Steep equity leverage effect
+    config.X0 = Eigen::VectorXd::Constant(config.num_assets, -2.0);     // Start at equilibrium
 
-        // Match by ticker string
-        VanillaOptionData target_contract = match_contract(test_ticker, contracts);
+    // 4. The Synthetic Network Topology Matrix (W)
+    // Row-normalized: each asset is equally influenced by its two peers
+    config.W = Eigen::MatrixXd::Zero(config.num_assets, config.num_assets);
+    config.W << 0.0, 0.5, 0.5,
+        0.5, 0.0, 0.5,
+        0.5, 0.5, 0.0;
 
-        std::cout << "\nTarget Asset: " << test_ticker << "\n";
-        std::cout << "Spot Price: $" << universe[test_idx].S0 << "\n";
-        std::cout << "Contract: Strike = $" << target_contract.strike
-            << ", TTM = " << target_contract.maturity << " yrs\n";
-
-        // 3. Setup the Option Object using your EuCall alias
-        EuCall test_option(target_contract.strike, target_contract.maturity);
-
-        // 4. Calibrate the Implied Dividend Yield
-        std::cout << "\n[*] Running Newton-Raphson Implied Dividend Calibration...\n";
-        double implied_q = IDivSolver<EuCall, BinomialPricer>::solve(
-            universe[test_idx], test_option, target_contract.targetPrice
-        );
-        universe[test_idx].q = implied_q;
-        std::cout << " -> Calibrated " << test_ticker << " Dividend Yield (q): "
-            << std::fixed << std::setprecision(4) << (implied_q * 100.0) << "%\n";
-
-        // ==========================================
-        // THE PRICING SHOWDOWN
-        // ==========================================
-        std::cout << "\n==================================================\n";
-        std::cout << " PRICING ENGINE COMPARISON\n";
-        std::cout << "==================================================\n";
-
-        // Engine 1: Black-Scholes (Closed Form)
-        double bs_price = BlackScholesPricer<EuCall>::price(universe[test_idx], test_option);
-        std::cout << std::left << std::setw(30) << "[1] Black-Scholes (Constant Vol):"
-            << "$" << bs_price << "\n";
-
-        // Engine 2: Binomial Tree (Discrete Space)
-        int tree_steps = 1000;
-        double binom_price = BinomialPricer<EuCall>::price(universe[test_idx], test_option, tree_steps);
-        std::cout << std::left << std::setw(30) << "[2] Binomial Tree (1000 steps):"
-            << "$" << binom_price << "\n";
-
-        // Engine 3: Spatiotemporal Network Monte Carlo (Stochastic Vol)
-        std::cout << "\n[*] Initializing Network Monte Carlo Engine...\n";
-        NetworkMonteCarloPricer mc_pricer(universe, net_config);
-
-        // Define a Lambda Payoff that isolates only our test asset
-        double K = target_contract.strike;
-        auto single_asset_payoff = [K, test_idx](const std::vector<double>& S_T) {
-            return std::max(S_T[test_idx] - K, 0.0);
-            };
-
-        size_t num_sims = 50000;
-        size_t trading_days = static_cast<size_t>(std::round(target_contract.maturity * 252));
-
-        auto start_time = std::chrono::high_resolution_clock::now();
-        double mc_price = mc_pricer.price_basket_option(num_sims, target_contract.maturity, trading_days, single_asset_payoff);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> mc_duration = end_time - start_time;
-
-        std::cout << std::left << std::setw(30) << "[3] Network Monte Carlo:"
-            << "$" << mc_price << " (" << num_sims << " paths, " << mc_duration.count() << " sec)\n";
-
-        std::cout << "==================================================\n";
-
+    // 5. Validation Check
+    if (!config.validate()) {
+        std::cerr << "Fatal Error: Simulation Config Validation Failed!" << std::endl;
+        return -1;
     }
-    catch (const std::exception& e) {
-        std::cerr << "\n[FATAL ERROR] " << e.what() << "\n";
-        return 1;
-    }
+
+    std::cout << "Configuration Validated. Running " << config.num_paths
+        << " paths..." << std::endl;
+
+    // 6. Run the Multi-Asset Simulator
+    NetworkSimulator simulator(config, 42); // Seeded for reproducibility
+    simulator.simulate();
+
+    std::cout << "Simulation Complete. Calculating European Option Prices..." << std::endl;
+
+    // 7. Instantiate the Pricer
+    EuropeanPricer euro_pricer(config, simulator.getAssetPaths());
+
+    // 8. Execute Pricing (At-The-Money Calls, Strike = 100)
+    double strike = 100.0;
+    Eigen::VectorXd call_prices = executePricing<EuropeanPricer>(euro_pricer, strike, true);
+
+    // 9. Execute Pricing (At-The-Money Puts, Strike = 100)
+    Eigen::VectorXd put_prices = executePricing<EuropeanPricer>(euro_pricer, strike, false);
+
+    // Output Results
+    std::cout << "\n--- Pricing Results (T = 1.0 Year, K = 100) ---" << std::endl;
+    std::cout << "Call Options:\n" << call_prices << "\n" << std::endl;
+    std::cout << "Put Options:\n" << put_prices << "\n" << std::endl;
 
     return 0;
 }

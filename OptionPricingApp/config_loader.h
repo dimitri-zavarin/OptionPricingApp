@@ -21,7 +21,7 @@ struct VanillaOptionData {
 
 struct NetworkConfigLoader {
 
-    // Reads network_config.csv (Ticker, S0, v0, omega_baseline, gamma_memory, r, q)
+    // Reads network_config.csv (Ticker, S0, v0, omega, gamma, mu_smearing, r, q)
     static void load_system_config(const std::string& filepath,
         std::vector<MarketData>& market_universe,
         std::vector<std::string>& tickers,
@@ -33,35 +33,36 @@ struct NetworkConfigLoader {
         }
 
         std::string line;
-        // Strip the Python column headers
         if (!std::getline(file, line)) return;
 
         market_universe.clear();
         tickers.clear();
-        config.omega_baseline.clear();
-        config.gamma_memory.clear();
+        config.omega.clear();
+        config.gamma.clear();
+        config.mu_smearing.clear();
 
         while (std::getline(file, line)) {
-            if (line.empty()) continue; // Skip trailing blank lines
+            if (line.empty()) continue;
             std::stringstream ss(line);
             std::string cell;
 
             std::string ticker;
-            double S0, v0, omega_b, gamma_m, r, q;
+            double S0, v0, omega_b, gamma_m, mu_s, r, q;
 
             std::getline(ss, ticker, ',');
             std::getline(ss, cell, ','); S0 = std::stod(cell);
             std::getline(ss, cell, ','); v0 = std::stod(cell);
             std::getline(ss, cell, ','); omega_b = std::stod(cell);
             std::getline(ss, cell, ','); gamma_m = std::stod(cell);
+            std::getline(ss, cell, ','); mu_s = std::stod(cell);
             std::getline(ss, cell, ','); r = std::stod(cell);
             std::getline(ss, cell, ','); q = std::stod(cell);
 
             tickers.push_back(ticker);
-            config.omega_baseline.push_back(omega_b);
-            config.gamma_memory.push_back(gamma_m);
+            config.omega.push_back(omega_b);
+            config.gamma.push_back(gamma_m);
+            config.mu_smearing.push_back(mu_s);
 
-            // Construct our market data block, natively passing the imported dividend yield
             MarketData asset_data(S0, r, std::sqrt(v0), q);
             market_universe.push_back(asset_data);
         }
