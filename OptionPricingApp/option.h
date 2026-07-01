@@ -3,15 +3,15 @@
 #include <algorithm>
 
 struct CallPayoff {
-	static double calculate(double S, double K) {
-		return std::max(S - K, 0.0);
-	}
+    static double calculate(double s, double k) {
+        return std::max(s - k, 0.0);
+    }
 };
 
 struct PutPayoff {
-	static double calculate(double S, double K) {
-		return std::max(K - S, 0.0);
-	}
+    static double calculate(double s, double k) {
+        return std::max(k - s, 0.0);
+    }
 };
 
 struct European {};
@@ -20,20 +20,26 @@ struct American {};
 template <typename PayoffType, typename ExerciseType>
 class Option {
 public:
-	double K; // strike price
-	double T; // time to maturity
+    Option(double strike, double maturity) : strike_(strike), maturity_(maturity) {}
 
-	using Payoff = PayoffType;
-	using Exercise = ExerciseType;
+    double payoff(double s) const { return PayoffType::calculate(s, strike_); }
 
-	Option(double strike, double maturity) : K(strike), T(maturity) {}
+    double strike() const { return strike_; }
+    double maturity() const { return maturity_; }
 
-	double payoff(double S) const {
-		return PayoffType::calculate(S, K);
-	}
+    Option with_maturity(double new_maturity) const {
+        return Option(strike_, new_maturity);
+    }
+
+    using Payoff = PayoffType;
+    using Exercise = ExerciseType;
+
+private:
+    double strike_;
+    double maturity_;
 };
 
-using EuCall = Option<CallPayoff, European>;
-using EuPut = Option<PutPayoff, European>;
-using AmCall = Option<CallPayoff, American>;
-using AmPut = Option<PutPayoff, American>;
+using EuropeanCall = Option<CallPayoff, European>;
+using EuropeanPut  = Option<PutPayoff, European>;
+using AmericanCall  = Option<CallPayoff, American>;
+using AmericanPut   = Option<PutPayoff, American>;

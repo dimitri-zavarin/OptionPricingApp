@@ -6,7 +6,7 @@
 #include "greeks.h"
 
 struct IVConfig {
-    double sigma = 0.3; // initial guess
+    double sigma = 0.3;
     double tol = 1e-6;
     int max_iter = 100;
     int steps = 1000;
@@ -16,16 +16,16 @@ template <typename OptionType, template <typename> typename PricerType>
 struct IVSolver {
     static double solve(MarketData mkt,
                         const OptionType& opt,
-                        double targetPrice,
+                        double target_price,
                         const IVConfig& config = IVConfig()) {
-    
+
         double sigma = config.sigma;
 
         for (int i = 0; i < config.max_iter; ++i) {
-            mkt.sigma = sigma;
+            mkt.volatility_ = sigma;
 
             double price = PricerType<OptionType>::price(mkt, opt, config.steps);
-            double diff = price - targetPrice;
+            double diff = price - target_price;
 
             if (std::abs(diff) < config.tol) { return sigma; }
 
