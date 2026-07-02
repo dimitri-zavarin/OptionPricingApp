@@ -7,34 +7,32 @@
 
 class EuropeanPricer {
 private:
-    const SimulationConfig& config;
-    const std::vector<Eigen::MatrixXd>& asset_paths;
+    const SimulationConfig& config_;
+    const std::vector<Eigen::MatrixXd>& asset_paths_;
 
 public:
     EuropeanPricer(const SimulationConfig& cfg, const std::vector<Eigen::MatrixXd>& paths)
-        : config(cfg), asset_paths(paths) {
+        : config_(cfg), asset_paths_(paths) {
     }
 
     Eigen::VectorXd price(double strike, bool is_call) const {
-        Eigen::VectorXd option_prices = Eigen::VectorXd::Zero(config.num_assets);
-        double T = config.num_steps * config.dt;
-        double discount_factor = std::exp(-config.risk_free_rate * T);
+        Eigen::VectorXd option_prices = Eigen::VectorXd::Zero(config_.num_assets);
+        double t = config_.num_steps * config_.dt;
+        double discount_factor = std::exp(-config_.risk_free_rate * t);
 
-        for (int p = 0; p < config.num_paths; ++p) {
-            Eigen::VectorXd S_T = asset_paths[p].col(config.num_steps);
+        for (int p = 0; p < config_.num_paths; ++p) {
+            Eigen::VectorXd s_t = asset_paths_[p].col(config_.num_steps);
 
-            // Fix: Use an explicit if-else block to isolate the different template types
-            Eigen::VectorXd payoffs(config.num_assets);
+            Eigen::VectorXd payoffs(config_.num_assets);
             if (is_call) {
-                payoffs = (S_T.array() - strike).cwiseMax(0.0).matrix();
-            }
-            else {
-                payoffs = (strike - S_T.array()).cwiseMax(0.0).matrix();
+                payoffs = (s_t.array() - strike).cwiseMax(0.0).matrix();
+            } else {
+                payoffs = (strike - s_t.array()).cwiseMax(0.0).matrix();
             }
 
             option_prices += payoffs;
         }
 
-        return (option_prices / static_cast<double>(config.num_paths)) * discount_factor;
+        return (option_prices / static_cast<double>(config_.num_paths)) * discount_factor;
     }
 };

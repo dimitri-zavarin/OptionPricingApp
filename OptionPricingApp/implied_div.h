@@ -6,7 +6,7 @@
 #include "greeks.h"
 
 struct IDivConfig {
-    double q = 0.005; // initial guess
+    double q = 0.005;
     double tol = 1e-6;
     int max_iter = 100;
     int steps = 1000;
@@ -16,16 +16,16 @@ template <typename OptionType, template <typename> typename PricerType>
 struct IDivSolver {
     static double solve(MarketData mkt,
         const OptionType& opt,
-        double targetPrice,
+        double target_price,
         const IDivConfig& config = IDivConfig()) {
 
         double q = config.q;
 
         for (int i = 0; i < config.max_iter; ++i) {
-            mkt.q = q;
+            mkt.dividend_yield_ = q;
 
             double price = PricerType<OptionType>::price(mkt, opt, config.steps);
-            double diff = price - targetPrice;
+            double diff = price - target_price;
 
             if (std::abs(diff) < config.tol) { return q; }
 

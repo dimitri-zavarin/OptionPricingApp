@@ -9,45 +9,41 @@
 
 template <typename OptionType>
 struct BinomialPricer {
-	using ExerciseType = typename OptionType::Exercise;
+    using ExerciseType = typename OptionType::Exercise;
 
-	static double price(const MarketData& data, const OptionType& opt, int steps) {
-		double dt = opt.T / steps;										// step size
-		double u = std::exp(data.sigma * std::sqrt(dt));				// upward move factor
-		double d = 1.0 / u;												// downward move factor
-		double p = (std::exp((data.r - data.q) * dt) - d) / (u - d);	// risk free probability of upward move
-		double discount = std::exp(-data.r * dt);						// discount rate per step
+    static double price(const MarketData& data, const OptionType& opt, int steps) {
+        double dt = opt.maturity() / steps;                                      // step size
+        double u = std::exp(data.volatility_ * std::sqrt(dt));                   // upward move factor
+        double d = 1.0 / u;                                                      // downward move factor
+        double p = (std::exp((data.risk_free_rate_ - data.dividend_yield_) * dt) - d) / (u - d); // risk neutral prob
+        double discount = std::exp(-data.risk_free_rate_ * dt);                  // discount per step
 
-		// (steps+1) length vector to store option prices at each tree node
-		std::vector<double> v(steps + 1);
+        std::vector<double> v(steps + 1);
 
-		double topNodePrice = data.S0 * std::pow(u, steps);		// stock price at top leaf
-		double ST = topNodePrice;
-		double ratio = d / u;									// factor to obtain stock price at the leaf below
+        double top_node_price = data.s0_ * std::pow(u, steps);                   // stock price at top leaf
+        double st = top_node_price;
+        double ratio = d / u;
 
-		for (int i = 0; i <= steps; ++i) {
-			v[i] = opt.payoff(ST);
-			ST *= ratio;
-		}
+        for (int i = 0; i <= steps; ++i) {
+            v[i] = opt.payoff(st);
+            st *= ratio;
+        }
 
-		// calculate top node price for (steps-1)th row
-		topNodePrice /= u;
+        top_node_price /= u;
 
-		// backward induction
-		for (int j = steps - 1; j >= 0; --j) {
-			double Sj = topNodePrice;
+        for (int j = steps - 1; j >= 0; --j) {
+            double s_j = top_node_price;
 
-			for (int i = 0; i <= j; ++i) {
-				v[i] = discount * (p * v[i] + (1 - p) * v[i + 1]);
+            for (int i = 0; i <= j; ++i) {
+                v[i] = discount * (p * v[i] + (1 - p) * v[i + 1]);
 
-				// check early exercise for American options
-				if constexpr (std::is_same_v<ExerciseType, American>) {
-					v[i] = std::max(v[i], opt.payoff(Sj));
-					Sj *= ratio;
-				}
-			}
-			topNodePrice /= u;
-		}
-		return v[0]; // return current option price
-	}
+                if constexpr (std::is_same_v<ExerciseType, American>) {
+                    v[i] = std::max(v[i], opt.payoff(s_j));
+                }
+                s_j *= ratio;
+            }
+            top_node_price /= u;
+        }
+        return v[0];
+    }
 };
