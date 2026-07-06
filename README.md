@@ -15,6 +15,7 @@ $$d\vec{X}_t = \vec{K} \odot \left( \vec{\theta} + \Gamma(W\vec{X}_t - \vec{X}_t
 *(Note: $\odot$ denotes the element-wise Hadamard product).*
 
 The correlated Wiener processes governing the asset returns and volatility shocks are defined as:
+
 $$d\vec{W}_t^v = \rho \, d\vec{W}_t^S + \sqrt{1 - \rho^2} \, d\vec{Z}_t$$
 
 **Parameter Definitions:**
@@ -36,7 +37,9 @@ To generate discrete Monte Carlo paths, the continuous-time system is approximat
 Given initial conditions $\vec{S}_0$ and $\vec{X}_0$, for each time step $t \in \{1, 2, \dots, T\}$:
 
 **Step 1: Draw Independent Shocks**
-Generate two independent standard normal vectors $\vec{Z}_1, \vec{Z}_2 \sim \mathcal{N}(\vec{0}, I)$.
+
+Generate two independent standard normal vectors:
+$$\vec{Z}_1, \vec{Z}_2 \sim \mathcal{N}(\vec{0}, I)$$
 
 **Step 2: Construct Correlated Brownian Increments**
 $$\Delta \vec{W}_t^S = \sqrt{\Delta t} \, \vec{Z}_1$$
