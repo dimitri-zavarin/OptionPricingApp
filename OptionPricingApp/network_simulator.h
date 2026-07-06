@@ -83,9 +83,9 @@ public:
                     (1.0 - config_.rho.array().square()).sqrt().matrix().cwiseProduct(z2));
 
                 // 3. Compute Spatiotemporal Volatility Contagion
-                //    Cross-sectional interaction is modeled via first-order time-lagged spatial lags (W * x_prev)
+                //    Cross-sectional interaction is modeled via first-order time-lagged spatial lags (W * x_prev - x_prev)
                 Eigen::VectorXd spatial_spillover = config_.W * x_prev;
-                Eigen::VectorXd dynamic_target = config_.theta + config_.gamma.cwiseProduct(spatial_spillover);
+                Eigen::VectorXd dynamic_target = config_.theta + config_.gamma.cwiseProduct(spatial_spillover - x_prev);
 
                 // 4. Update Latent Log-Variance Network via Euler-Maruyama Approximation
                 //    dX_t = kappa * (dynamic_target - X_t_prev) * dt + xi * dwv

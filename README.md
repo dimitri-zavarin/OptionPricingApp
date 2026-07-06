@@ -10,7 +10,7 @@ The joint dynamics of the asset prices and their underlying network-coupled log-
 
 $$d\vec{S}_t = (\vec{r} - \vec{q}) \odot \vec{S}_t \, dt + \sqrt{\exp(\vec{X}_t)} \odot \vec{S}_t \odot d\vec{W}_t^S$$
 
-$$d\vec{X}_t = \vec{K} \odot \left( \vec{\theta} + \Gamma(W\vec{X}_t - \vec{X}_t) - \vec{X}_t \right) dt + \vec{\xi} \odot d\vec{W}_t^v$$
+$$d\vec{X}_t = \vec{K} \odot \left( \vec{\theta} + \vec{\gamma} \odot (W\vec{X}_t - \vec{X}_t) - \vec{X}_t \right) dt + \vec{\xi} \odot d\vec{W}_t^v$$
 
 *(Note: $\odot$ denotes the element-wise Hadamard product).*
 
@@ -19,11 +19,12 @@ The correlated Wiener processes governing the asset returns and volatility shock
 $$d\vec{W}_t^v = \rho \, d\vec{W}_t^S + \sqrt{1 - \rho^2} \, d\vec{Z}_t$$
 
 **Parameter Definitions:**
+
 * $\vec{r}$: $N \times 1$ risk-free rate vector.
 * $\vec{q}$: $N \times 1$ continuously compounded dividend yield vector.
 * $\vec{\theta}$: $N \times 1$ idiosyncratic baseline log-variance target vector.
 * $\vec{K}$: $N \times 1$ mean-reversion speed vector.
-* $\Gamma$: $N \times N$ diagonal network volatility sensitivity matrix ($\text{diag}(\gamma_1, \dots, \gamma_N)$).
+* $\vec{\gamma}$: $N \times 1$ network volatility sensitivity vector.
 * $W$: $N \times N$ spatial network edge weight matrix (rows normalized to sum to 1).
 * $\vec{\xi}$: $N \times 1$ volatility-of-volatility vector.
 * $\rho$: Scalar $\in [-1, 1]$ representing the asymmetric return-variance correlation (leverage effect).
@@ -46,7 +47,7 @@ $$\Delta \vec{W}_t^S = \sqrt{\Delta t} \, \vec{Z}_1$$
 $$\Delta \vec{W}_t^v = \rho \sqrt{\Delta t} \, \vec{Z}_1 + \sqrt{1 - \rho^2} \sqrt{\Delta t} \, \vec{Z}_2$$
 
 **Step 3: Update Network Log-Variance (Euler-Maruyama)**
-$$\vec{X}_t = \vec{X}_{t-1} + \vec{K} \odot \left( \vec{\theta} + \Gamma(W\vec{X}_{t-1} - \vec{X}_{t-1}) - \vec{X}_{t-1} \right) \Delta t + \vec{\xi} \odot \Delta \vec{W}_t^v$$
+$$\vec{X}_t = \vec{X}_{t-1} + \vec{K} \odot \left( \vec{\theta} + \vec{\gamma} \odot (W\vec{X}_{t-1} - \vec{X}_{t-1}) - \vec{X}_{t-1} \right) \Delta t + \vec{\xi} \odot \Delta \vec{W}_t^v$$
 
 **Step 4: Transform to Real Variance**
 $$\vec{V}_{t-1} = \exp(\vec{X}_{t-1})$$
