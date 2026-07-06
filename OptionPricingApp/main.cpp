@@ -2,153 +2,161 @@
 #include <iomanip>
 #include <vector>
 #include <string>
+#include <cmath>
 #include <Eigen/Dense>
 
-// Core options logic and data structures
+// Core framework integrations
 #include "option.h"
 #include "market_data.h"
 #include "simulation_config.h"
-
-// Univariate pricing modules (Benchmarks)
-#include "black_scholes.h"
-#include "binomial.h"
-
-// Multi-Asset Spatiotemporal Matrix Network modules
 #include "network_simulator.h"
 #include "network_pricers.h"
 
-int main() {
-    // --- Set Console Formatting ---
-    std::cout << std::fixed << std::setprecision(5);
-    std::cout << "=================================================================\n";
-    std::cout << "     QUANT FINANCE MULTI-ASSET NETWORK LSM PRICING HARNESS        \n";
-    std::cout << "               (ACTIVE NETWORK SPILLOVERS SETUP)                 \n";
-    std::cout << "=================================================================\n\n";
+// Struct to hold cross-sectional results for clean tabulation
+struct PricingResult {
+    std::string ticker;
+    double euro_call;
+    double amer_call;
+    double call_prem;
+    double euro_put;
+    double amer_put;
+    double put_prem;
+};
 
-    // =========================================================================
-    // STEP 1: INITIALIZE THE 3-ASSET SPILLOVER SYSTEM
-    // =========================================================================
-    std::cout << "[1/4] Constructing Interconnected Network Configuration...\n";
-
-    SimulationConfig config;
-    config.num_assets = 3;
-    config.num_paths = 150000;                     // Robust path count for LSM convergence
-    config.num_steps = 252;                       // 1 trading year of daily steps
-    config.dt = 1.0 / 252.0;                      // Daily temporal fraction
-    config.risk_free_rate = 0.05;                 // r = 5%
-
-    // Starting asset spots [N x 1]
-    config.S0 = Eigen::VectorXd::Zero(3);
-    config.S0 << 100.0, 100.0, 100.0;
-
-    // Dividend yields (Keep high to evaluate put/call boundaries under correlation)
-    config.q = Eigen::VectorXd::Zero(3);
-    config.q << 0.08, 0.00, 0.12;
-
-    // Unfreeze the Heston Volatility Network Dynamics
-    config.X0 = Eigen::VectorXd::Constant(3, -3.2);      // Starting log-variance state (~20.19% vol)
-    config.theta = Eigen::VectorXd::Constant(3, -3.2);   // Long-run log-variance targets
-    config.kappa = Eigen::VectorXd::Constant(3, 2.0);    // Volatility mean-reversion speed (\kappa = 2.0)
-    config.xi = Eigen::VectorXd::Constant(3, 0.15);      // Vol-of-vol coefficients (\xi = 15%)
-    config.rho = Eigen::VectorXd::Constant(3, -0.60);    // Asymmetric leverage correlation (\rho = -60%)
-
-    // Activate the Spatial Coupling Spillover Matrix [N x N]
-    config.gamma = Eigen::VectorXd::Constant(3, 0.40);   // Global network coupling sensitivity
-
-    // Construct asymmetric network dependencies:
-    // Row i, Col j implies asset j spillovers into asset i.
-    config.W = Eigen::MatrixXd::Zero(3, 3);
-    config.W(1, 0) = 0.60;  // AAPL shocks spill heavily into MSFT (60% weight)
-    config.W(2, 0) = 0.40;  // AAPL shocks spill moderately into GOOG (40% weight)
-    config.W(2, 1) = 0.30;  // MSFT shocks spill into GOOG (30% weight)
-
-    config.tickers = { "AAPL", "MSFT", "GOOG" };
-
-    if (!config.validate()) {
-        std::cerr << "CRITICAL ERROR: Simulation configuration validation failed!\n";
-        return -1;
+// Helper function to print headers cleanly
+void print_regime_table(const std::string& title, double T, const std::vector<PricingResult>& results) {
+    std::cout << "\n--------------------------------------------------------------------------------------------------\n";
+    std::cout << " REGIME: " << title << " | TENOR: T = " << std::fixed << std::setprecision(4) << T << " Year (" << int(T * 12) << "M)\n";
+    std::cout << "--------------------------------------------------------------------------------------------------\n";
+    std::cout << std::left << std::setw(8) << "Ticker"
+        << std::setw(15) << "Euro Call"
+        << std::setw(15) << "Raw Amer Call"
+        << std::setw(15) << "Call Prem"
+        << std::setw(15) << "Euro Put"
+        << std::setw(15) << "Raw Amer Put"
+        << "Put Prem\n";
+    std::cout << "--------------------------------------------------------------------------------------------------\n";
+    for (const auto& res : results) {
+        std::cout << std::left << std::setw(8) << res.ticker
+            << std::setw(15) << res.euro_call << std::setw(15) << res.amer_call << std::setw(15) << res.call_prem
+            << std::setw(15) << res.euro_put << std::setw(15) << res.amer_put << res.put_prem << "\n";
     }
-    std::cout << ">> Spillover network architecture verified successfully.\n\n";
+}
 
-    // =========================================================================
-    // STEP 2: RUN THE HYBRID NETWORK PATH GENERATOR
-    // =========================================================================
-    std::cout << "[2/4] Executing Spatiotemporal Path Simulation...\n";
+// Global execution wrapper for a given maturity horizon
+std::vector<PricingResult> evaluate_regime(SimulationConfig& config, double strike, double maturity) {
+    // Re-run the simulation path matrix for this specific time-horizon step count
+    // Note: To match maturity precisely, we step daily up to the target tenor horizon.
+    config.num_steps = static_cast<int>(252.0 * maturity);
+    if (config.num_steps == 0) config.num_steps = 21; // Baseline for 1-Month boundary
+    config.dt = maturity / static_cast<double>(config.num_steps);
+
     NetworkSimulator simulator(config, 42);
     simulator.simulate();
-    std::cout << ">> Generated " << config.num_paths << " coupled paths successfully.\n\n";
 
-    // =========================================================================
-    // STEP 3: INITIALIZE PRICERS AND OPTIONS CONTRACT INTERFACES
-    // =========================================================================
-    std::cout << "[3/4] Initializing Multi-Asset European and American Pricers...\n";
-    double target_strike = 100.0;
-    double maturity_time = config.num_steps * config.dt; // 1.0 Year
+    EuropeanPricer euro_engine(config, simulator.get_asset_paths());
+    AmericanPricer<AmericanCall> amer_call_engine(config, simulator.get_asset_paths());
+    AmericanPricer<AmericanPut>  amer_put_engine(config, simulator.get_asset_paths());
 
-    EuropeanPricer european_engine(config, simulator.get_asset_paths());
-    AmericanPricer<AmericanCall> american_call_engine(config, simulator.get_asset_paths());
-    AmericanPricer<AmericanPut>  american_put_engine(config, simulator.get_asset_paths());
+    Eigen::VectorXd euro_calls = euro_engine.price(strike, true);
+    Eigen::VectorXd euro_puts = euro_engine.price(strike, false);
 
-    Eigen::VectorXd net_euro_calls = european_engine.price(target_strike, true);
-    Eigen::VectorXd net_euro_puts = european_engine.price(target_strike, false);
-    std::cout << ">> Pricer pipelines generated.\n\n";
-
-    // =========================================================================
-    // STEP 4: PRINT SIDE-BY-SIDE ARBITRAGE-FLOORED COMPARISON MATRICES
-    // =========================================================================
-    std::cout << "[4/4] Generating Cross-Sectional Pricing Analysis...\n\n";
-
-    std::cout << "---------------------------------------------------------------------------------\n";
-    std::cout << std::left << std::setw(8) << "Ticker"
-        << std::setw(10) << "Div (q)"
-        << std::setw(15) << "Euro Call ($)"
-        << std::setw(15) << "Amer Call ($)"
-        << std::setw(15) << "Euro Put ($)"
-        << "Amer Put ($)\n";
-    std::cout << "---------------------------------------------------------------------------------\n";
-
+    std::vector<PricingResult> results;
     for (int i = 0; i < config.num_assets; ++i) {
-        AmericanCall call_contract(target_strike, maturity_time);
-        AmericanPut  put_contract(target_strike, maturity_time);
+        double ac = amer_call_engine.price_asset_option(i, AmericanCall(strike, maturity));
+        double ap = amer_put_engine.price_asset_option(i, AmericanPut(strike, maturity));
 
-        // Raw LSM outputs containing localized regression noise
-        double raw_amer_call = american_call_engine.price_asset_option(i, call_contract);
-        double raw_amer_put = american_put_engine.price_asset_option(i, put_contract);
-
-        // Production Standard: Enforce the hard European Arbitrage Boundary Floor
-        double floored_amer_call = std::max(raw_amer_call, net_euro_calls(i));
-        double floored_amer_put = std::max(raw_amer_put, net_euro_puts(i));
-
-        std::cout << std::left << std::setw(8) << config.tickers[i]
-            << std::setw(10) << config.q(i)
-            << std::setw(15) << net_euro_calls(i)
-            << std::setw(15) << floored_amer_call
-            << std::setw(15) << net_euro_puts(i)
-            << floored_amer_put << "\n";
+        results.push_back({
+            config.tickers[i],
+            euro_calls(i), ac, (ac - euro_calls(i)),
+            euro_puts(i),  ap, (ap - euro_puts(i))
+            });
     }
-    std::cout << "---------------------------------------------------------------------------------\n\n";
+    return results;
+}
 
-    // =========================================================================
-    // STEP 5: FINANCIAL SANITY VERIFICATIONS
-    // =========================================================================
-    std::cout << "Financial Sanity Verifications (Network Environment):\n";
-
-    // Re-verify MSFT call boundary with the production floor active
-    double msft_call_lsm = american_call_engine.price_asset_option(1, AmericanCall(target_strike, maturity_time));
-    double msft_diff = std::abs(net_euro_calls(1) - std::max(msft_call_lsm, net_euro_calls(1)));
-    std::cout << ">> MSFT (q=0) American Call vs. European Call Delta: " << msft_diff
-        << (msft_diff < 1e-4 ? " (PASSED - Arbitrage Boundary Maintained)" : " (FAILED)") << "\n";
-
-    // Evaluate how network volatility spillovers from AAPL warped the premium profiles
-    double aapl_call_premium = std::max(american_call_engine.price_asset_option(0, AmericanCall(target_strike, maturity_time)), net_euro_calls(0)) - net_euro_calls(0);
-    double msft_put_premium = std::max(american_put_engine.price_asset_option(1, AmericanPut(target_strike, maturity_time)), net_euro_puts(1)) - net_euro_puts(1);
-
-    std::cout << ">> AAPL Active Early Exercise Call Premium: $" << aapl_call_premium << "\n";
-    std::cout << ">> MSFT Active Early Exercise Put Premium:  $" << msft_put_premium << "\n\n";
-
+int main() {
     std::cout << "=================================================================\n";
-    std::cout << "             LSM BACKWARD INDUCTION TEST COMPLETE                \n";
+    std::cout << "     PROFESSOR ROJAS COMPREHENSIVE LSM SPATIOTEMPORAL SUITE     \n";
+    std::cout << "             (RAW ALGORITHMIC OUTPUT MULTI-TENOR MODE)           \n";
     std::cout << "=================================================================\n";
 
+    const int num_assets = 3;
+    const int num_paths = 50000; // Optimal speed/variance balance for prototyping
+    const double strike = 100.0;
+
+    // Define our two target temporal maturities for exploration
+    std::vector<double> tenors = { 1.0 / 12.0, 1.0 }; // 1 Month vs 1 Year
+
+    SimulationConfig config;
+    config.num_assets = num_assets;
+    config.num_paths = num_paths;
+    config.risk_free_rate = 0.05;
+    config.tickers = { "AAPL", "MSFT", "GOOG" };
+
+    config.S0 = Eigen::VectorXd::Constant(num_assets, 100.0);
+    config.q = Eigen::VectorXd::Zero(num_assets);
+    config.q << 0.08, 0.00, 0.12; // Retaining varying contract constraints
+
+    // Lambda helper to easily reset baseline model physics before setting topology
+    auto reset_baseline = [&]() {
+        config.X0 = Eigen::VectorXd::Constant(num_assets, -3.2);
+        config.theta = Eigen::VectorXd::Constant(num_assets, -3.2);
+        config.kappa = Eigen::VectorXd::Constant(num_assets, 2.0);
+        config.xi = Eigen::VectorXd::Constant(num_assets, 0.15);
+        config.rho = Eigen::VectorXd::Constant(num_assets, -0.60);
+        config.gamma = Eigen::VectorXd::Zero(num_assets);
+        config.W = Eigen::MatrixXd::Zero(num_assets, num_assets);
+        };
+
+    // Loop across both tenors to explore temporal interactions
+    for (double T : tenors) {
+        std::cout << "\n\n==================================================================================================";
+        std::cout << "\n   COMPILING ANALYSIS FOR MATURITY HORIZON: T = " << std::fixed << std::setprecision(4) << T << " YEAR";
+        std::cout << "\n==================================================================================================\n";
+
+        // Regime 1: Uncoupled Heston
+        reset_baseline();
+        print_regime_table("1. UNCOUPLED BASELINE HOUSINGS (W = 0)", T, evaluate_regime(config, strike, T));
+
+        // Regime 2: Standard Apple-Led Case
+        reset_baseline();
+        config.gamma = Eigen::VectorXd::Constant(num_assets, 0.50);
+        config.W(1, 0) = 0.70; // AAPL -> MSFT
+        config.W(2, 0) = 0.50; // AAPL -> GOOG
+        print_regime_table("2. STANDARD APPLE-LED TOPOLOGY", T, evaluate_regime(config, strike, T));
+
+        // Regime 3: Echo Chamber Case
+        reset_baseline();
+        config.gamma = Eigen::VectorXd::Constant(num_assets, 0.50);
+        config.W(0, 2) = 0.40; // Cyclical loop feedback loop
+        config.W(1, 0) = 0.50;
+        config.W(2, 1) = 0.50;
+        config.xi = Eigen::VectorXd::Constant(num_assets, 0.35); // Elevated vol-of-vol
+        print_regime_table("3. CYCLICAL NETWORK ECHO CHAMBER", T, evaluate_regime(config, strike, T));
+
+        // Regime 4: Apple Vol Shock
+        reset_baseline();
+        config.gamma = Eigen::VectorXd::Constant(num_assets, 0.80);
+        config.X0(0) = -1.0; // Idiosyncratic volatility spike today
+        config.theta(0) = -1.0;
+        config.W(1, 0) = 1.0;
+        config.W(2, 0) = 1.0;
+        print_regime_table("4. IDIOSYNCRATIC APPLE VOL SHOCK", T, evaluate_regime(config, strike, T));
+
+        // Regime 5: Volatility Sink
+        reset_baseline();
+        config.gamma = Eigen::VectorXd::Constant(num_assets, 0.80);
+        config.kappa(1) = 8.0; // Extreme mean-reversion speed
+        config.theta(1) = -4.0; // Compressing to low log-variance floors
+        config.X0(1) = -4.0;
+        config.W(0, 1) = 0.90; // AAPL and GOOG anchored tightly to MSFT
+        config.W(2, 1) = 0.90;
+        print_regime_table("5. VOLATILITY SINK (MSFT ANCHOR)", T, evaluate_regime(config, strike, T));
+    }
+
+    std::cout << "\n=================================================================\n";
+    std::cout << "             ALL TIME-HORIZON RUNS LOGGED SUCCESSFUL             \n";
+    std::cout << "=================================================================\n";
     return 0;
 }
