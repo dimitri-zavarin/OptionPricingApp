@@ -46,7 +46,6 @@ void print_regime_table(const std::string& title, double T, const std::vector<Pr
 // Global execution wrapper for a given maturity horizon
 std::vector<PricingResult> evaluate_regime(SimulationConfig& config, double strike, double maturity) {
     // Re-run the simulation path matrix for this specific time-horizon step count
-    // Note: To match maturity precisely, we step daily up to the target tenor horizon.
     config.num_steps = static_cast<int>(252.0 * maturity);
     if (config.num_steps == 0) config.num_steps = 21; // Baseline for 1-Month boundary
     config.dt = maturity / static_cast<double>(config.num_steps);
@@ -54,17 +53,24 @@ std::vector<PricingResult> evaluate_regime(SimulationConfig& config, double stri
     NetworkSimulator simulator(config, 42);
     simulator.simulate();
 
-    EuropeanPricer euro_engine(config, simulator.get_asset_paths());
+    // 1. Instantiate contract instances to leverage the unified template payoff architecture
+    AmericanCall call_contract(strike, maturity);
+    AmericanPut  put_contract(strike, maturity);
+
+    // 2. Initialize templated pricing engines using the contract classes
+    EuropeanPricer<AmericanCall> euro_call_engine(config, simulator.get_asset_paths());
+    EuropeanPricer<AmericanPut>  euro_put_engine(config, simulator.get_asset_paths());
     AmericanPricer<AmericanCall> amer_call_engine(config, simulator.get_asset_paths());
     AmericanPricer<AmericanPut>  amer_put_engine(config, simulator.get_asset_paths());
 
-    Eigen::VectorXd euro_calls = euro_engine.price(strike, true);
-    Eigen::VectorXd euro_puts = euro_engine.price(strike, false);
+    // 3. Execute vector pricing via the refactored .price(opt) signatures
+    Eigen::VectorXd euro_calls = euro_call_engine.price(call_contract);
+    Eigen::VectorXd euro_puts = euro_put_engine.price(put_contract);
 
     std::vector<PricingResult> results;
     for (int i = 0; i < config.num_assets; ++i) {
-        double ac = amer_call_engine.price_asset_option(i, AmericanCall(strike, maturity));
-        double ap = amer_put_engine.price_asset_option(i, AmericanPut(strike, maturity));
+        double ac = amer_call_engine.price_asset_option(i, call_contract);
+        double ap = amer_put_engine.price_asset_option(i, put_contract);
 
         results.push_back({
             config.tickers[i],
@@ -82,7 +88,7 @@ int main() {
     std::cout << "=================================================================\n";
 
     const int num_assets = 3;
-    const int num_paths = 50000; // Optimal speed/variance balance for prototyping
+    const int num_paths = 50000;
     const double strike = 100.0;
 
     // Define our two target temporal maturities for exploration
@@ -96,7 +102,7 @@ int main() {
 
     config.S0 = Eigen::VectorXd::Constant(num_assets, 100.0);
     config.q = Eigen::VectorXd::Zero(num_assets);
-    config.q << 0.08, 0.00, 0.12; // Retaining varying contract constraints
+    config.q << 0.08, 0.00, 0.12;
 
     // Lambda helper to easily reset baseline model physics before setting topology
     auto reset_baseline = [&]() {
