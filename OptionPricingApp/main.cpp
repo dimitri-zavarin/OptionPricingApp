@@ -70,18 +70,30 @@ void evaluate_and_display_regime(SimulationConfig& config, const std::string& ti
     simulator.simulate();
 
     const auto& asset_paths = simulator.get_asset_paths();
+    const auto& log_variance_paths = simulator.get_log_variance_paths();
 
     AmericanCall call_contract(strike, maturity);
     AmericanPut  put_contract(strike, maturity);
 
     EuropeanPricer<AmericanCall> euro_call_engine(config, asset_paths);
     EuropeanPricer<AmericanPut>  euro_put_engine(config, asset_paths);
-    AmericanPricer<AmericanCall> amer_call_engine(config, asset_paths);
-    AmericanPricer<AmericanPut>  amer_put_engine(config, asset_paths);
+
+    AmericanPricer<AmericanCall> amer_call_engine(config, asset_paths, log_variance_paths, config.W);
+    AmericanPricer<AmericanPut>  amer_put_engine(config, asset_paths, log_variance_paths, config.W);
 
     Eigen::VectorXd euro_calls = euro_call_engine.price(call_contract);
     Eigen::VectorXd euro_puts = euro_put_engine.price(put_contract);
 
+    // PRE-COMPUTE AMERICAN PRICES
+    // This allows all OLS diagnostics to print to the console BEFORE the table starts drawing
+    Eigen::VectorXd amer_calls(config.num_assets);
+    Eigen::VectorXd amer_puts(config.num_assets);
+    for (int i = 0; i < config.num_assets; ++i) {
+        amer_calls(i) = amer_call_engine.price_asset_option(i, call_contract);
+        amer_puts(i) = amer_put_engine.price_asset_option(i, put_contract);
+    }
+
+    // PRINT CLEAN DERIVATIVES SURFACE TABLE
     std::cout << "\n--- DERIVATIVES SURFACE VALUATIONS (T = " << maturity << " Year) ---\n";
     std::cout << std::left << std::setw(8) << "Ticker"
         << std::setw(15) << "Euro Call"
@@ -93,16 +105,13 @@ void evaluate_and_display_regime(SimulationConfig& config, const std::string& ti
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
     for (int i = 0; i < config.num_assets; ++i) {
-        double ac = amer_call_engine.price_asset_option(i, call_contract);
-        double ap = amer_put_engine.price_asset_option(i, put_contract);
-
         std::cout << std::left << std::setw(8) << config.tickers[i]
             << std::setw(15) << std::fixed << std::setprecision(4) << euro_calls(i)
-            << std::setw(15) << ac
-            << std::setw(15) << (ac - euro_calls(i))
+            << std::setw(15) << amer_calls(i)
+            << std::setw(15) << (amer_calls(i) - euro_calls(i))
             << std::setw(15) << euro_puts(i)
-            << std::setw(15) << ap
-            << (ap - euro_puts(i)) << "\n";
+            << std::setw(15) << amer_puts(i)
+            << (amer_puts(i) - euro_puts(i)) << "\n";
     }
     std::cout << "==================================================================================================\n";
 }
@@ -114,7 +123,7 @@ int main() {
     std::cout << "=================================================================\n";
 
     const int num_assets = 3;
-    const int num_paths = 50000;
+    const int num_paths = 150000;
     const double strike = 100.0;
     const double maturity = 1.0;
 
@@ -138,13 +147,11 @@ int main() {
         };
 
     // 1. DECOUPLED BASELINE REGIME
-    // Every asset maps 100% to itself by default via the identity matrix structure
     reset_baseline();
     config.W = Eigen::MatrixXd::Identity(num_assets, num_assets);
     evaluate_and_display_regime(config, "1. DECOUPLED STANDALONE HESTON (W = I)", strike, maturity);
 
     // 2. STANDARD LINKED REGIME
-    // AAPL is independent (self-loop). MSFT and GOOG pull completely from AAPL.
     reset_baseline();
     config.gamma = Eigen::VectorXd::Constant(num_assets, 0.50);
     config.W(0, 0) = 1.00; // AAPL self-loop (Row sum = 1.0)
@@ -153,7 +160,6 @@ int main() {
     evaluate_and_display_regime(config, "2. STANDARD LINKED STAR TOPOLOGY", strike, maturity);
 
     // 3. VOLATILITY SPIKE REGIME
-    // AAPL holds an explosive internal shock. Rows remain strictly normalized.
     reset_baseline();
     config.gamma = Eigen::VectorXd::Constant(num_assets, 0.80);
     config.X0(0) = -1.0;
@@ -164,7 +170,6 @@ int main() {
     evaluate_and_display_regime(config, "3. IDIOSYNCRATIC APPLE VOLATILITY SHOCK", strike, maturity);
 
     // 4. VOLATILITY SINK REGIME
-    // MSFT is an independent low-variance sink node (self-loop). AAPL/GOOG pull 90% from MSFT, 10% from self.
     reset_baseline();
     config.gamma = Eigen::VectorXd::Constant(num_assets, 0.80);
     config.kappa(1) = 8.0;

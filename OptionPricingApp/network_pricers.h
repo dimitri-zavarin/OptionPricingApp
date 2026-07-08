@@ -5,21 +5,14 @@
 #include <Eigen/Dense>
 #include <vector>
 #include <cmath>
+#include <iostream>
+#include <iomanip>
+#include <string>
+#include <sstream>
 
 /**
  * @class EuropeanPricer
  * @brief Computes European option prices from pre-simulated asset paths.
- *
- * This pricer assumes that `asset_paths_` contains `config_.num_paths` simulation
- * matrices. Each matrix has `config_.num_assets` rows and `config_.num_steps + 1`
- * columns (including the initial time t=0 column). The pricer computes the payoff
- * at maturity for each asset across all paths, averages the payoffs, and applies
- * discounting to return the present value.
- *
- * Notes:
- * - The pricer returns a vector of size `config_.num_assets` containing the price
- *   for each asset in the basket for the given strike and option type (call/put).
- * - Payoffs are computed elementwise for each asset (no cross-asset payoffs).
  */
 template <typename OptionType>
 class EuropeanPricer {
@@ -32,11 +25,6 @@ public:
         : config_(cfg), asset_paths_(paths) {
     }
 
-    /**
-     * @brief Prices the option for each asset in the basket simultaneously.
-     * @param opt The templated option contract containing the payoff structure.
-     * @return Eigen::VectorXd containing the present value prices for each asset.
-     */
     Eigen::VectorXd price(const OptionType& opt) const {
         Eigen::VectorXd option_prices = Eigen::VectorXd::Zero(config_.num_assets);
         double t = config_.num_steps * config_.dt;
@@ -44,12 +32,9 @@ public:
 
         for (int p = 0; p < config_.num_paths; ++p) {
             Eigen::VectorXd s_t = asset_paths_[p].col(config_.num_steps);
-
-            // Apply the contract's payoff function element-wise to the price vector
             Eigen::VectorXd payoffs = s_t.unaryExpr([&opt](double s) {
                 return opt.payoff(s);
                 });
-
             option_prices += payoffs;
         }
 
@@ -59,48 +44,71 @@ public:
 
 /**
  * @class AmericanPricer
- * @brief Evaluates American option premiums across simulated Monte Carlo paths
- * utilizing Longstaff-Schwartz (LSM) backward induction with cross-sectional
- * z-scoring and an orthogonal probabilists' Hermite polynomial basis.
+ * @brief Evaluates American option premiums utilizing an optimized, dynamically
+ * truncating Longstaff-Schwartz regression basis (4-Term or 5-Term), complete
+ * with a rolling statistical significance and standard error profiler.
  */
 template <typename OptionType>
 class AmericanPricer {
 private:
     const SimulationConfig& config_;
     const std::vector<Eigen::MatrixXd>& asset_paths_;
+    const std::vector<Eigen::MatrixXd>& variance_paths_;
+    const Eigen::MatrixXd& W_;
 
     /**
-     * @brief Generates orthogonal Probabilists' Hermite polynomials.
-     * @param z The cross-sectionally standardized log-moneyness (z-score).
-     * @return Eigen::VectorXd containing a 4-term orthogonal basis.
+     * @brief Generates an optimized 4-term or 5-term Hermite basis depending on
+     * the presence of active exogenous network connections.
      */
-    Eigen::VectorXd evaluate_hermite_basis(double z) const {
-        Eigen::VectorXd basis(4);
-        basis(0) = 1.0;                           // He_0(z)
-        basis(1) = z;                             // He_1(z)
-        basis(2) = z * z - 1.0;                   // He_2(z)
-        basis(3) = std::pow(z, 3) - 3.0 * z;      // He_3(z)
+    Eigen::VectorXd evaluate_optimized_basis(double S_i, double X_i, double N_x_exo, bool is_network_linked) const {
+        int num_features = is_network_linked ? 5 : 4;
+        Eigen::VectorXd basis(num_features);
+
+        basis(0) = 1.0;                  // Constant
+        basis(1) = S_i;                  // S (Moneyness)
+        basis(2) = S_i * S_i - 1.0;      // S^2 - 1 (Convexity)
+        basis(3) = X_i;                  // X (Local Variance)
+
+        if (is_network_linked) {
+            basis(4) = N_x_exo;          // Nx_exo (Network Variance Contagion)
+        }
+
         return basis;
     }
 
 public:
-    AmericanPricer(const SimulationConfig& cfg, const std::vector<Eigen::MatrixXd>& paths)
-        : config_(cfg), asset_paths_(paths) {
+    AmericanPricer(const SimulationConfig& cfg,
+        const std::vector<Eigen::MatrixXd>& a_paths,
+        const std::vector<Eigen::MatrixXd>& v_paths,
+        const Eigen::MatrixXd& W)
+        : config_(cfg), asset_paths_(a_paths), variance_paths_(v_paths), W_(W) {
     }
 
-    /**
-     * @brief Prices the American option independently for a specific asset index in the basket.
-     * @param asset_idx The row index corresponding to the target stock.
-     * @param opt The templated American option contract containing the payoff structure.
-     * @return The fair-value American option premium today (t=0).
-     */
     double price_asset_option(int asset_idx, const OptionType& opt) const {
         int num_paths = config_.num_paths;
         int num_steps = config_.num_steps;
         double discount_factor = std::exp(-config_.risk_free_rate * config_.dt);
-        double strike = opt.strike();
 
-        // 1. Initialize the Cash Flow vector at Maturity (T)
+        // --- Topological Scan: Determine if asset relies on neighbors ---
+        bool is_network_linked = false;
+        for (int col = 0; col < config_.num_assets; ++col) {
+            if (col != asset_idx && std::abs(W_(asset_idx, col)) > 1e-9) {
+                is_network_linked = true;
+                break;
+            }
+        }
+
+        int num_features = is_network_linked ? 5 : 4;
+        std::vector<std::string> term_names = is_network_linked ?
+            std::vector<std::string>{"Const", "S", "S^2-1", "X", "Nx_exo"} :
+            std::vector<std::string>{ "Const", "S", "S^2-1", "X" };
+
+        // --- Initialize Significance & Standard Error Trackers ---
+        std::vector<int> significance_hits(num_features, 0);
+        std::vector<double> sum_std_errors(num_features, 0.0);
+        int valid_regressions = 0;
+
+        // 1. Initialize Cash Flow vector at T
         Eigen::VectorXd cash_flows(num_paths);
         for (int p = 0; p < num_paths; ++p) {
             double s_T = asset_paths_[p](asset_idx, num_steps);
@@ -109,61 +117,84 @@ public:
 
         // 2. Roll backward through time (T-1 down to 1)
         for (int t = num_steps - 1; t >= 1; --t) {
-
             cash_flows *= discount_factor;
 
             std::vector<int> itm_paths;
             itm_paths.reserve(num_paths);
-            std::vector<double> itm_x; // Store raw log-moneyness
-            itm_x.reserve(num_paths);
-            double sum_x = 0.0;
 
-            // 3. Identify ITM paths and extract log-moneyness
+            // 3. Identify ITM paths
             for (int p = 0; p < num_paths; ++p) {
                 double s_t = asset_paths_[p](asset_idx, t);
                 if (opt.payoff(s_t) > 0.0) {
                     itm_paths.push_back(p);
-                    double x = std::log(s_t / strike);
-                    itm_x.push_back(x);
-                    sum_x += x;
                 }
             }
 
             int num_itm = static_cast<int>(itm_paths.size());
-            if (num_itm < 3) continue;
+            if (num_itm < num_features + 5) continue; // Minimum required for stable regression
 
-            // 4. Compute cross-sectional Mean and Standard Deviation for Z-Scoring
-            double mean_x = sum_x / num_itm;
-            double variance_x = 0.0;
-            for (double x : itm_x) {
-                variance_x += (x - mean_x) * (x - mean_x);
-            }
-            double std_x = std::sqrt(variance_x / (num_itm - 1.0));
-            if (std_x < 1e-8) std_x = 1.0; // Prevent division by zero on identical paths
-
-            // 5. Construct Design Matrix (A) and Target Vector (Y)
-            Eigen::MatrixXd mat_a(num_itm, 4);
+            // 4. Construct Design Matrix (A) and Target Vector (Y)
+            Eigen::MatrixXd mat_a(num_itm, num_features);
             Eigen::VectorXd vec_y(num_itm);
 
             for (int i = 0; i < num_itm; ++i) {
                 int p_idx = itm_paths[i];
-                double z = (itm_x[i] - mean_x) / std_x; // Standardize to z-score
+                double S_i = asset_paths_[p_idx](asset_idx, t);
+                double X_i = variance_paths_[p_idx](asset_idx, t);
 
-                mat_a.row(i) = evaluate_hermite_basis(z);
+                double N_x_exo = 0.0;
+                if (is_network_linked) {
+                    for (int col = 0; col < config_.num_assets; ++col) {
+                        if (col != asset_idx) {
+                            N_x_exo += W_(asset_idx, col) * variance_paths_[p_idx](col, t);
+                        }
+                    }
+                }
+
+                mat_a.row(i) = evaluate_optimized_basis(S_i, X_i, N_x_exo, is_network_linked);
                 vec_y(i) = cash_flows(p_idx);
             }
 
-            // 6. Execute Least Squares Regression via Rank-Revealing QR
-            Eigen::VectorXd beta = mat_a.colPivHouseholderQr().solve(vec_y);
+            // 5. Execute Least Squares Regression
+            Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(mat_a);
+            Eigen::VectorXd beta = qr.solve(vec_y);
+
+            // 6. Rolling Diagnostic: Accumulate Standard Errors and record T-Stats
+            Eigen::VectorXd residuals = vec_y - (mat_a * beta);
+            double rss = residuals.squaredNorm();
+            double sigma_squared = rss / (num_itm - static_cast<double>(num_features));
+
+            Eigen::MatrixXd ata = mat_a.transpose() * mat_a;
+            Eigen::MatrixXd cov_matrix = sigma_squared * ata.colPivHouseholderQr().solve(Eigen::MatrixXd::Identity(num_features, num_features));
+
+            valid_regressions++;
+            for (int j = 0; j < num_features; ++j) {
+                double se = std::sqrt(std::max(0.0, cov_matrix(j, j)));
+                sum_std_errors[j] += se;                // Accumulate rolling Standard Error
+
+                double t_stat = beta(j) / (se + 1e-12); // Prevent div by zero
+                if (std::abs(t_stat) > 1.96) {          // 95% Confidence threshold
+                    significance_hits[j]++;
+                }
+            }
 
             // 7. Evaluate the Early Exercise Condition
             for (int i = 0; i < num_itm; ++i) {
                 int p_idx = itm_paths[i];
-                double s_t = asset_paths_[p_idx](asset_idx, t);
+                double S_i = asset_paths_[p_idx](asset_idx, t);
+                double X_i = variance_paths_[p_idx](asset_idx, t);
 
-                double immediate_exercise = opt.payoff(s_t);
-                double z = (itm_x[i] - mean_x) / std_x;
-                double continuation_value = evaluate_hermite_basis(z).dot(beta);
+                double N_x_exo = 0.0;
+                if (is_network_linked) {
+                    for (int col = 0; col < config_.num_assets; ++col) {
+                        if (col != asset_idx) {
+                            N_x_exo += W_(asset_idx, col) * variance_paths_[p_idx](col, t);
+                        }
+                    }
+                }
+
+                double immediate_exercise = opt.payoff(S_i);
+                double continuation_value = evaluate_optimized_basis(S_i, X_i, N_x_exo, is_network_linked).dot(beta);
 
                 if (immediate_exercise > continuation_value) {
                     cash_flows(p_idx) = immediate_exercise;
@@ -171,7 +202,31 @@ public:
             }
         }
 
-        // 8. Discount final cash flows to t=0 and average
+        // 8. Print the Final Significance & Error Summary Block
+        if (valid_regressions > 0) {
+            std::cout << "\n--- OLS Diagnostics (Asset " << asset_idx
+                << " | " << num_features << "-Term Basis | Valid Regressions: "
+                << valid_regressions << "/" << num_steps - 1 << ") ---" << std::endl;
+
+            std::cout << std::left << std::setw(12) << "Term"
+                << std::setw(18) << "Significance %"
+                << "Avg StdError" << std::endl;
+            std::cout << std::string(45, '-') << std::endl;
+
+            for (int j = 0; j < num_features; ++j) {
+                double hit_percentage = (static_cast<double>(significance_hits[j]) / valid_regressions) * 100.0;
+                double avg_se = sum_std_errors[j] / valid_regressions;
+
+                std::stringstream ss;
+                ss << std::fixed << std::setprecision(1) << hit_percentage << "%";
+
+                std::cout << std::left << std::setw(12) << term_names[j]
+                    << std::setw(18) << ss.str()
+                    << std::fixed << std::setprecision(4) << avg_se << std::endl;
+            }
+            std::cout << std::string(45, '-') << "\n" << std::endl;
+        }
+
         cash_flows *= discount_factor;
         return cash_flows.mean();
     }
