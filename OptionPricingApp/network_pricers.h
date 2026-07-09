@@ -11,6 +11,37 @@
 #include <sstream>
 
 /**
+ * @brief Template trait class to extract human-readable option type metadata
+ */
+template <typename PayoffType, typename ExerciseType>
+struct OptionTraits;
+
+// Specializations for all 4 option types
+template <>
+struct OptionTraits<CallPayoff, European> {
+    static constexpr const char* payoff_type() { return "Call"; }
+    static constexpr const char* exercise_type() { return "European"; }
+};
+
+template <>
+struct OptionTraits<PutPayoff, European> {
+    static constexpr const char* payoff_type() { return "Put"; }
+    static constexpr const char* exercise_type() { return "European"; }
+};
+
+template <>
+struct OptionTraits<CallPayoff, American> {
+    static constexpr const char* payoff_type() { return "Call"; }
+    static constexpr const char* exercise_type() { return "American"; }
+};
+
+template <>
+struct OptionTraits<PutPayoff, American> {
+    static constexpr const char* payoff_type() { return "Put"; }
+    static constexpr const char* exercise_type() { return "American"; }
+};
+
+/**
  * @class EuropeanPricer
  * @brief Computes European option prices from pre-simulated asset paths.
  */
@@ -90,7 +121,7 @@ public:
         int num_paths = config_.num_paths;
         int num_steps = config_.num_steps;
         double discount_factor = std::exp(-config_.risk_free_rate * config_.dt);
-        double strike = opt.strike();  // Get the strike price
+        double strike = opt.strike();
 
         // --- Topological Scan: Determine if asset relies on neighbors ---
         bool is_network_linked = false;
@@ -209,7 +240,13 @@ public:
 
         // 8. Print the Final Significance, Error, and Beta Summary Block
         if (valid_regressions > 0) {
-            std::cout << "\n--- OLS Diagnostics (Asset " << asset_idx
+            std::string ticker = config_.tickers[asset_idx];
+            std::string payoff = OptionTraits<typename OptionType::Payoff, typename OptionType::Exercise>::payoff_type();
+            std::string exercise = OptionTraits<typename OptionType::Payoff, typename OptionType::Exercise>::exercise_type();
+            
+            std::cout << "\n--- OLS Diagnostics (Ticker: " << ticker
+                << " | Type: " << exercise << " " << payoff
+                << " | Asset " << asset_idx
                 << " | " << num_features << "-Term Basis | Valid Regressions: "
                 << valid_regressions << "/" << num_steps - 1 << ") ---" << std::endl;
 
@@ -229,7 +266,8 @@ public:
                 double median_beta;
                 if (sorted_betas.size() % 2 == 0) {
                     median_beta = (sorted_betas[sorted_betas.size() / 2 - 1] + sorted_betas[sorted_betas.size() / 2]) / 2.0;
-                } else {
+                }
+                else {
                     median_beta = sorted_betas[sorted_betas.size() / 2];
                 }
 
@@ -239,7 +277,8 @@ public:
                 double median_se;
                 if (sorted_ses.size() % 2 == 0) {
                     median_se = (sorted_ses[sorted_ses.size() / 2 - 1] + sorted_ses[sorted_ses.size() / 2]) / 2.0;
-                } else {
+                }
+                else {
                     median_se = sorted_ses[sorted_ses.size() / 2];
                 }
 
