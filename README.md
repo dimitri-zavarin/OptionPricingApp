@@ -1,6 +1,6 @@
 # OptionPricingApp
 
-## Spatiotemporal Network Heston Model
+## Multi-Asset Spatiotemporal Stochastic Volatility Options Engine
 
 This engine simulates a multi-asset basket under a network-coupled stochastic volatility framework. The model tracks a collection of $N$ assets over time $t \in [0, T]$, where the spot prices are defined by the state vector $\vec{S}_t = [S_{1,t}, S_{2,t}, \dots, S_{N,t}]^T$.
 
