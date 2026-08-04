@@ -30,6 +30,9 @@ struct SimulationConfig {
 
     // === Static Network Topology Matrix (N x N) ===
     Eigen::MatrixXd W;        // Row-normalized spatial weight matrix
+    
+    // === Equity Return Correlations via Cholesky Decomposition ===
+    Eigen::MatrixXd L;        // Lower triangular matrix from Cholesky decomposition of correlation matrix
 
     // === Metadata ===
     std::vector<std::string> tickers; // Order matching the matrix rows
@@ -49,6 +52,7 @@ struct SimulationConfig {
         if (rho.size() != num_assets) return false;
         if (X0.size() != num_assets) return false;
         if (W.rows() != num_assets || W.cols() != num_assets) return false;
+        if (L.rows() != num_assets || L.cols() != num_assets) return false;
         return true;
     }
 };
