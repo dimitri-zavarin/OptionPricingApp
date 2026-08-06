@@ -1,7 +1,7 @@
 import requests
 import numpy as np
 import pandas as pd
-import yfinance as yf  # Add this import
+import yfinance as yf
 from statsmodels.tsa.api import VAR
 
 
@@ -20,13 +20,26 @@ def get_equity_price_history(tickers, lookback_days=252):
     print(f"Fetching equity price history for {len(tickers)} assets...")
     
     try:
-        # Download OHLCV data from Yahoo Finance
-        price_data = yf.download(
+        # Download OHLCV data with explicit auto_adjust=True
+        df = yf.download(
             tickers=tickers,
             period=f'{lookback_days + 30}d',  # Extra buffer for dropped NaNs
             interval='1d',
+            auto_adjust=True,                # Automatically adjusts OHLC for splits/dividends
             progress=False
-        )['Adj Close']
+        )
+        
+        # If multi-level columns exist (e.g. ('Close', 'NVDA')), extract 'Close' or 'Adj Close'
+        if isinstance(df.columns, pd.MultiIndex):
+            if 'Close' in df.columns.levels[0]:
+                price_data = df['Close']
+            elif 'Adj Close' in df.columns.levels[0]:
+                price_data = df['Adj Close']
+            else:
+                price_data = df.xs(df.columns.levels[0][0], axis=1, level=0)
+        else:
+            # Single level column fallback
+            price_data = df['Close'] if 'Close' in df.columns else df
         
         # Handle single ticker case (returns Series instead of DataFrame)
         if isinstance(price_data, pd.Series):
@@ -45,47 +58,6 @@ def get_equity_price_history(tickers, lookback_days=252):
     except Exception as e:
         print(f"[ERROR] Failed to fetch equity prices: {e}")
         raise
-
-
-def get_dolthub_iv_history(tickers, lookback_days=252):
-    """
-    Queries DoltHub for historical implied volatility data using ticker-by-ticker requests.
-    This data is used for the Diebold-Yilmaz VAR weight matrix W.
-    """
-    print(f"Querying DoltHub for {len(tickers)} assets (IV data for network matrix)...")
-
-    all_dfs = []
-    api_url = "https://www.dolthub.com/api/v1alpha1/post-no-preference/options/master"
-
-    # Loop through each ticker and fetch its historical implied volatility data
-    for ticker in tickers:
-        query = f"""
-            SELECT date, act_symbol, iv_current
-            FROM volatility_history
-            WHERE act_symbol = '{ticker}'
-        """
-        response = requests.get(api_url, params={'q': query})
-        response.raise_for_status()
-
-        data = response.json()
-        if 'rows' in data and data['rows']:
-            df_ticker = pd.DataFrame(data['rows'])
-            all_dfs.append(df_ticker)
-        else:
-            print(f"  -> [WARNING] No historical IV data found for {ticker}")
-
-    if not all_dfs:
-        raise KeyError("DoltHub returned an empty data structure for all assets.")
-
-    df = pd.concat(all_dfs, ignore_index=True)
-    df['date'] = pd.to_datetime(df['date'])
-    df['iv_current'] = df['iv_current'].astype(float)
-
-    pivot_df = df.pivot(index='date', columns='act_symbol', values='iv_current').sort_index()
-
-    cleaned_df = pivot_df.ffill().tail(lookback_days).dropna(axis=1)
-
-    return cleaned_df
 
 
 def calculate_return_correlation_matrix(price_dataframe):
@@ -143,80 +115,62 @@ def export_cholesky_matrix_to_csv(cholesky_L, tickers, output_filename="cholesky
     print(L_df.iloc[:5, :5].round(6))
 
 
-def calculate_kpps_generalized_fevd(var_results, forecast_horizon=10):
+def generate_hybrid_W_matrix(price_dataframe, tickers, skeleton_csv="skeleton_W_matrix.csv", fevd_steps=10):
     """
-    Implements the Generalized Forecast Error Variance Decomposition (KPPS)
-    from Diebold & Yilmaz (2012) to ensure results are invariant to variable ordering.
+    Builds the W matrix by combining a structural binary mask (skeleton) 
+    with dynamic edge weights from a Diebold-Yilmaz VAR FEVD.
     """
-    sigma_u = var_results.sigma_u.values
-    N = sigma_u.shape[0]
-    A = var_results.ma_rep(maxn=forecast_horizon)
-    
-    theta = np.zeros((N, N))
-    
-    for i in range(N):
-        for j in range(N):
-            numerator = 0.0
-            denominator = 0.0
-            sigma_jj = sigma_u[j, j]
-            
-            e_i = np.zeros(N)
-            e_i[i] = 1.0
-            e_j = np.zeros(N)
-            e_j[j] = 1.0
-            
-            for h in range(forecast_horizon):
-                A_h = A[h]
-                term_num = np.dot(np.dot(e_i, A_h), np.dot(sigma_u, e_j))
-                numerator += (term_num ** 2) / sigma_jj
-                
-                term_den_matrix = np.dot(np.dot(A_h, sigma_u), A_h.T)
-                term_den = np.dot(np.dot(e_i, term_den_matrix), e_i)
-                denominator += term_den
-                
-            theta[i, j] = numerator / denominator
-
-    # Normalize by row sum to enforce row-stochastic boundaries (Eq. 2 in paper)
-    theta_tilde = theta / theta.sum(axis=1, keepdims=True)
-    return theta_tilde
-
-
-def generate_sparse_dynamic_W_matrix(iv_dataframe, self_reliance=0.20, horizon=10, max_neighbors=3):
-    """
-    Fits a VAR model on IV data, calculates KPPS generalized spillovers, and enforces 
-    top-K sparsity to optimize C++ engine computation.
-    """
-    print("\nBuilding network matrix W from IV spillovers...")
-    tickers = iv_dataframe.columns
+    print(f"\nBuilding Hybrid W matrix using structural prior: '{skeleton_csv}'...")
     N = len(tickers)
     
-    model = VAR(iv_dataframe)
+    # 1. Load Skeleton Mask
+    try:
+        skeleton_df = pd.read_csv(skeleton_csv, index_col=0)
+        # Ensure the mask columns/index exactly match the order of our tickers
+        skeleton_df = skeleton_df.loc[tickers, tickers]
+        mask = skeleton_df.values
+    except FileNotFoundError:
+        print(f"[ERROR] {skeleton_csv} not found! Please create it in the project folder.")
+        raise
+    except Exception as e:
+        print(f"[ERROR] Could not parse {skeleton_csv}: {e}")
+        raise
+        
+    # CRITICAL: Ensure self-loops are explicitly allowed (1.0) for every asset
+    np.fill_diagonal(mask, 1.0)
+    
+    # 2. Fit VAR and extract Diebold-Yilmaz Variance Decomposition (FEVD)
+    print("  → Fitting VAR(1) model to log-returns...")
+    log_returns = np.log(price_dataframe / price_dataframe.shift(1)).dropna()
+    model = VAR(log_returns)
     results = model.fit(maxlags=1)
-    spillover_matrix = calculate_kpps_generalized_fevd(results, forecast_horizon=horizon)
     
-    W_raw = spillover_matrix.copy()
-    np.fill_diagonal(W_raw, 0.0)
+    print(f"  → Computing Forecast Error Variance Decomposition (Steps={fevd_steps})...")
+    fevd = results.fevd(fevd_steps)
     
-    W_sparse = np.zeros((N, N))
-    exogenous_budget = 1.0 - self_reliance
+    # statsmodels fevd.decomp shape is (num_assets, fevd_steps, num_assets)
+    # fevd.decomp[i, -1, j] is the proportion of asset i's variance explained by asset j at the final horizon
+    dy_matrix = fevd.decomp[:, -1, :]
     
+    # 3. Apply Structural Mask (Hadamard Product)
+    print("  → Applying structural prior mask to DY spillovers...")
+    W_filtered = dy_matrix * mask
+
+    # 3b. Apply Minimum Threshold Floor (Zero out sub-1% noise)
+    min_threshold = 0.01  # 1% minimum spillover
+    W_filtered[W_filtered < min_threshold] = 0.0
+    
+    # 4. Row-Stochastic Normalization
+    W_final = np.zeros((N, N))
     for i in range(N):
-        W_sparse[i, i] = self_reliance
-        
-        row_values = W_raw[i, :].copy()
-        top_neighbor_indices = np.argsort(row_values)[::-1][:max_neighbors]
-        
-        filtered_row = np.zeros(N)
-        filtered_row[top_neighbor_indices] = row_values[top_neighbor_indices]
-        
-        row_sum = np.sum(filtered_row)
+        row_sum = np.sum(W_filtered[i, :])
         if row_sum > 1e-9:
-            W_sparse[i, np.arange(N) != i] = (filtered_row[np.arange(N) != i] / row_sum) * exogenous_budget
+            W_final[i, :] = W_filtered[i, :] / row_sum
         else:
-            W_sparse[i, top_neighbor_indices] = exogenous_budget / max_neighbors
-    
-    print("  ✓ Network matrix W constructed and sparsified")
-    return pd.DataFrame(W_sparse, index=tickers, columns=tickers)
+            # Fallback for completely isolated nodes
+            W_final[i, i] = 1.0
+            
+    return pd.DataFrame(W_final, index=tickers, columns=tickers)
 
 
 # --- EXECUTION FLOW ---
@@ -225,32 +179,27 @@ if __name__ == "__main__":
                       "JPM", "GS", "XOM", "META", "TSLA", "NFLX"]
     
     try:
-        # 1. Fetch equity price data for return correlations
         equity_prices = get_equity_price_history(target_tickers, lookback_days=252)
         
-        # 2. Calculate and export Cholesky decomposition for equity return correlations
+        # 1. Generate and save Cholesky Matrix
         correlation_matrix, cholesky_L = calculate_return_correlation_matrix(equity_prices)
         export_cholesky_matrix_to_csv(cholesky_L, target_tickers, "cholesky_L_matrix.csv")
         
-        # 3. Fetch IV data for network matrix construction
-        real_market_ivs = get_dolthub_iv_history(target_tickers, lookback_days=252)
-        print("\nSuccessfully pulled IV data. Shape:", real_market_ivs.shape)
+        # 2. Generate and save Hybrid W Matrix
+        W_matrix = generate_hybrid_W_matrix(
+            price_dataframe=equity_prices, 
+            tickers=target_tickers,
+            skeleton_csv="skeleton_W_matrix.csv",
+            fevd_steps=10
+        )
         
-        # 4. Build sparse directional weight matrix W from IV spillovers
-        W_matrix = generate_sparse_dynamic_W_matrix(real_market_ivs, self_reliance=0.20, horizon=10, max_neighbors=3)
-        
-        print("\n=== FINAL ROW-STOCHASTIC W MATRIX ===")
+        print("\n=== FINAL HYBRID ROW-STOCHASTIC W MATRIX ===")
         pd.set_option('display.max_columns', None)
         pd.set_option('display.width', 1000)
         print(W_matrix.round(4))
         
-        # 5. Export network matrix for C++ engine
         W_matrix.to_csv("calibrated_W_matrix.csv")
         print("\n✓ Saved network matrix to 'calibrated_W_matrix.csv'.")
-        
-        print("\n" + "="*60)
-        print("PIPELINE COMPLETE: Both cholesky_L_matrix.csv and")
-        print("calibrated_W_matrix.csv ready for C++ engine!")
         print("="*60)
         
     except Exception as e:

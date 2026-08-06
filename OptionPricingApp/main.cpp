@@ -8,34 +8,24 @@
 #include "option.h"
 #include "network_simulator.h"
 #include "network_pricers.h"
+#include "config_loader.h"
 
-void run_regime(const std::string& regime_name, const SimulationConfig& config,
-    const std::vector<std::string>& tickers,
-    const Eigen::MatrixXd& W) {
-
+/**
+ * @brief Executes a single simulation regime, computes option prices, and prints diagnostics.
+ */
+void run_regime(const std::string& regime_name, const SimulationConfig& config) {
     std::cout << "\n==================================================================================================" << std::endl;
     std::cout << " REGIME CONFIGURATION: " << regime_name << std::endl;
     std::cout << "==================================================================================================" << std::endl;
 
-    // --- Print Network Topology ---
+    // --- Print Key Parameters ---
     std::cout << "--- CRUCIAL STRUCTURAL PARAMETERS ---\n";
     std::cout << "Ticker    S0        Div (q)   Kappa     Theta     X0        Gamma (Sensitivity)\n";
     std::cout << "--------------------------------------------------------------------------------------------------\n";
     for (int i = 0; i < config.num_assets; ++i) {
         printf("%-9s %-9.1f %-9.2f %-9.1f %-9.2f %-9.2f %-9.2f\n",
-            tickers[i].c_str(), config.S0(i), config.q(i), config.kappa(i),
+            config.tickers[i].c_str(), config.S0(i), config.q(i), config.kappa(i),
             config.theta(i), config.X0(i), config.gamma(i));
-    }
-
-    std::cout << "\n  Spatial Topology Matrix (W):\n              ";
-    for (const auto& t : tickers) std::cout << t << "    ";
-    std::cout << "\n";
-    for (int i = 0; i < config.num_assets; ++i) {
-        std::cout << "    " << tickers[i] << "  [ ";
-        for (int j = 0; j < config.num_assets; ++j) {
-            printf("%7.2f ", W(i, j));
-        }
-        std::cout << " ]\n";
     }
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
@@ -51,8 +41,8 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config,
     EuropeanPricer<EuropeanCall> eu_call_pricer(config, asset_paths);
     EuropeanPricer<EuropeanPut>  eu_put_pricer(config, asset_paths);
 
-    AmericanPricer<AmericanCall> am_call_pricer(config, asset_paths, variance_paths, W);
-    AmericanPricer<AmericanPut>  am_put_pricer(config, asset_paths, variance_paths, W);
+    AmericanPricer<AmericanCall> am_call_pricer(config, asset_paths, variance_paths, config.W);
+    AmericanPricer<AmericanPut>  am_put_pricer(config, asset_paths, variance_paths, config.W);
 
     // Using ATM strike for all assets (Assuming S0 = 100 for all)
     double strike = 100.0;
@@ -88,7 +78,7 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config,
         double p_prem = amer_puts[i] - euro_puts(i);
 
         printf("%-7s %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f\n",
-            tickers[i].c_str(), euro_calls(i), amer_calls[i], c_prem,
+            config.tickers[i].c_str(), euro_calls(i), amer_calls[i], c_prem,
             euro_puts(i), amer_puts[i], p_prem);
     }
 }
@@ -96,22 +86,25 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config,
 int main() {
     std::cout << "=================================================================\n";
     std::cout << "          SPATIOTEMPORAL GRAPH LAPLACIAN ANALYSIS\n";
-    std::cout << "               (5-NODE CASCADING NETWORK)\n";
+    std::cout << "          (12-NODE BASKET W/ CSV MATRIX LOADING)\n";
     std::cout << "=================================================================\n";
 
-    int num_assets = 5;
-    std::vector<std::string> tickers = { "NVDA", "AMD", "AAPL", "MSFT", "GOOG" };
+    int num_assets = 12;
+    std::vector<std::string> tickers = {
+        "NVDA", "AMD", "AAPL", "MSFT", "GOOG", "AMZN",
+        "JPM", "GS", "XOM", "META", "TSLA", "NFLX"
+    };
 
     // --- Base Configuration ---
     SimulationConfig config;
     config.num_assets = num_assets;
-    config.num_paths = 150000;
+    config.num_paths = 50000; // Lowered from 150k to 50k for speed during 12-asset testing
     config.num_steps = 252;
     config.dt = 1.0 / 252.0;
     config.risk_free_rate = 0.04;
-    config.tickers = tickers;  // <-- POPULATE THE TICKERS VECTOR
+    config.tickers = tickers;
 
-    // Standardize initial parameters across all 5 assets
+    // Standardize initial Heston parameters across all 12 assets
     config.S0 = Eigen::VectorXd::Constant(num_assets, 100.0);
     config.kappa = Eigen::VectorXd::Constant(num_assets, 2.0);
     config.theta = Eigen::VectorXd::Constant(num_assets, -3.20);
@@ -120,57 +113,42 @@ int main() {
     config.xi = Eigen::VectorXd::Constant(num_assets, 0.60);    // Vol of vol
     config.rho = Eigen::VectorXd::Constant(num_assets, -0.70);  // Leverage effect
 
-    // Set Dividends (q)
-    config.q = Eigen::VectorXd(num_assets);
-    config.q << 0.00, 0.00, 0.08, 0.00, 0.12;
-
-
-    // ========================================================================
-    // REGIME 1: The Cascading Supply Chain Shock
-    // NVDA acts as the source, spilling into AMD, which cascades into Big Tech.
-    // ========================================================================
-    SimulationConfig config_cascade = config;  // This now inherits tickers
-    config_cascade.X0(0) = -1.00;
-    config_cascade.theta(0) = -1.00;
-
-    Eigen::MatrixXd W_cascade = Eigen::MatrixXd::Zero(num_assets, num_assets);
-    // Row 0 (NVDA): Pure standalone source
-    W_cascade(0, 0) = 1.00;
-    // Row 1 (AMD): 50% tied to NVDA's variance, 50% local
-    W_cascade(1, 0) = 0.50; W_cascade(1, 1) = 0.50;
-    // Row 2 (AAPL): Heavy hardware reliance on NVDA/AMD
-    W_cascade(2, 0) = 0.40; W_cascade(2, 1) = 0.40; W_cascade(2, 2) = 0.20;
-    // Row 3 (MSFT): Software, slower absorption of the hardware shock
-    W_cascade(3, 2) = 0.60; W_cascade(3, 3) = 0.40;
-    // Row 4 (GOOG): Absorbs from MSFT and AAPL
-    W_cascade(4, 2) = 0.30; W_cascade(4, 3) = 0.30; W_cascade(4, 4) = 0.40;
-
-    config_cascade.W = W_cascade;
-    run_regime("1. CASCADING SUPPLY CHAIN SHOCK", config_cascade, tickers, W_cascade);
-
+    // Set Dividends (q) - Assigning basic yields to specific tickers
+    config.q = Eigen::VectorXd::Zero(num_assets);
+    config.q(2) = 0.05; // AAPL
+    config.q(3) = 0.08; // MSFT
+    config.q(6) = 0.20; // JPM
+    config.q(8) = 0.35; // XOM
 
     // ========================================================================
-    // REGIME 2: The Global Volatility Sink (The Black Hole)
-    // MSFT acts as a massive variance sink. All other assets tether to it.
+    // FILE I/O: Load Python-Generated Matrices
     // ========================================================================
-    SimulationConfig config_sink = config;  // This now inherits tickers
-    config_sink.kappa(3) = 8.0;     // MSFT mean-reverts violently
-    config_sink.theta(3) = -4.00;   // MSFT baseline variance is crushed
-    config_sink.X0(3) = -4.00;
+    std::string cholesky_file = "cholesky_L_matrix.csv";
+    std::string w_matrix_file = "calibrated_W_matrix.csv"; // Change to calibrated_W_matrix.csv later
 
-    Eigen::MatrixXd W_sink = Eigen::MatrixXd::Zero(num_assets, num_assets);
-    for (int i = 0; i < num_assets; ++i) {
-        if (i == 3) {
-            W_sink(i, i) = 1.00; // MSFT is standalone
-        }
-        else {
-            W_sink(i, i) = 0.20; // 20% Local
-            W_sink(i, 3) = 0.80; // 80% Routed to Sink
-        }
+    if (!ConfigLoader::load_matrices_into_config(config, cholesky_file, w_matrix_file)) {
+        std::cerr << "\n[FATAL] Exiting simulation due to matrix loading failure.\n";
+        return 1;
     }
 
-    config_sink.W = W_sink;
-    run_regime("2. GLOBAL VOLATILITY SINK (MSFT BLACK HOLE)", config_sink, tickers, W_sink);
+    // ========================================================================
+    // REGIME 1: Baseline Market
+    // Uses standard volatility starts and lets the imported network run neutrally.
+    // ========================================================================
+    run_regime("1. BASELINE MARKET (LOADED TOPOLOGY)", config);
+
+    // ========================================================================
+    // REGIME 2: Organic Network Contagion Shock
+    // Instead of hardcoding a cascade, we shock ONE asset (NVDA).
+    // The imported W matrix will automatically route this shock to connected assets!
+    // ========================================================================
+    SimulationConfig config_cascade = config;
+
+    // Inject massive volatility shock to NVDA (Index 0)
+    config_cascade.X0(0) = -1.00;     // Instant volatility spike
+    config_cascade.theta(0) = -1.00;  // Sustain the volatility
+
+    run_regime("2. NVDA SHOCK PROPAGATING VIA LOADED W MATRIX", config_cascade);
 
     return 0;
 }
