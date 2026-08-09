@@ -8,31 +8,33 @@ This engine simulates a multi-asset basket under a network-coupled stochastic vo
 
 The joint dynamics of the asset prices and their underlying network-coupled log-variance processes are governed by the following system of stochastic differential equations:
 
-$$d\vec{S}_t = (\vec{r} - \vec{q}) \odot \vec{S}_t \, dt + \sqrt{\exp(\vec{X}_t)} \odot \vec{S}_t \odot d\vec{W}_t^{S,\text{corr}}$$
+$$d\vec{S}_t = (\vec{r} - \vec{q}) \odot \vec{S}_t \, dt + \sqrt{\exp(\vec{X}_t)} \odot \vec{S}_t \odot d\vec{W}_t^S$$
 
-$$d\vec{X}_t = \vec{K} \odot \left( \vec{\theta} + \vec{\gamma} \odot (W\vec{X}_t - \vec{X}_t) - \vec{X}_t \right) dt + \vec{\xi} \odot d\vec{W}_t^v$$
+$$d\vec{X}_t = \vec{\kappa} \odot \left( \vec{\theta} + \vec{\gamma} \odot (W\vec{X}_t - \vec{X}_t) - \vec{X}_t \right) dt + \vec{\xi} \odot d\vec{W}_t^v$$
 
 *(Note: $\odot$ denotes the element-wise Hadamard product).*
 
-The correlated Wiener processes governing the asset returns and volatility shocks are defined as:
+The correlated Wiener processes governing the asset returns and volatility shocks are defined in terms of independent standard normal variates $\vec{Z}_1, \vec{Z}_2 \sim \mathcal{N}(\vec{0}, I_N)$ transformed via Cholesky decomposition:
 
-$$d\vec{W}_t^{S,\text{corr}} = L \, d\vec{W}_t^{S,\text{indep}}$$
+$$d\vec{Z}_1^{\text{corr}} = L \, d\vec{Z}_1$$
 
-$$d\vec{W}_t^v = \rho \, d\vec{W}_t^{S,\text{indep}} + \sqrt{1 - \rho^2} \, d\vec{Z}_t$$
+where $L$ is the lower triangular Cholesky factor of the equity return correlation matrix $\Sigma$. The transformed shocks are used for both asset returns and volatility:
 
-where $L$ is the lower triangular Cholesky factor of the equity return correlation matrix $\Sigma$.
+$$d\vec{W}_t^S = L \, d\vec{Z}_1$$
+
+$$d\vec{W}_t^v = \vec{\rho} \odot L \, d\vec{Z}_1 + \sqrt{1 - \vec{\rho}^2} \odot d\vec{Z}_2$$
 
 **Parameter Definitions:**
 
 * $\vec{r}$: $N \times 1$ risk-free rate vector.
 * $\vec{q}$: $N \times 1$ continuously compounded dividend yield vector.
 * $\vec{\theta}$: $N \times 1$ idiosyncratic baseline log-variance target vector.
-* $\vec{K}$: $N \times 1$ mean-reversion speed vector.
+* $\vec{\kappa}$: $N \times 1$ mean-reversion speed vector.
 * $\vec{\gamma}$: $N \times 1$ network volatility sensitivity vector.
 * $W$: $N \times N$ directed network edge weight matrix (rows normalized to sum to 1).
-* $\vec{\xi}$: $N \times 1" volatility-of-volatility vector.
-* $\rho$: Scalar $\in [-1, 1]$ representing the asymmetric return-variance correlation (leverage effect).
-* $\Sigma": $N \times N$ empirical correlation matrix of equity log-returns.
+* $\vec{\xi}$: $N \times 1$ volatility-of-volatility vector.
+* $\vec{\rho}$: $N \times 1$ vector of asset-specific leverage correlations $\in [-1, 1]$ (each element represents return-variance correlation for that asset).
+* $\Sigma$: $N \times N$ empirical correlation matrix of equity log-returns.
 * $L$: $N \times N$ lower triangular Cholesky decomposition matrix such that $\Sigma = LL^T$.
 
 ---
@@ -94,25 +96,31 @@ To generate discrete Monte Carlo paths, the continuous-time system is approximat
 
 Given initial conditions $\vec{S}_0$ and $\vec{X}_0$, for each time step $t \in \{1, 2, \dots, T\}$:
 
-**Step 1: Draw Independent Standard Normal Shocks**
+**Step 1: Generate Independent Standard Normal Shocks**
 
 Generate two independent standard normal vectors:
 $$\vec{Z}_1, \vec{Z}_2 \sim \mathcal{N}(\vec{0}, I_N)$$
 
-**Step 2: Apply Cholesky Transformation for Correlated Asset Returns**
+**Step 2: Apply Cholesky Transformation**
 
-Transform the first shock vector via the lower triangular Cholesky matrix to induce direct equity return correlations:
+Transform the independent shocks via the Cholesky matrix to induce multi-asset return correlations:
 $$\vec{Z}_1^{\text{corr}} = L \, \vec{Z}_1$$
 
-where $L$ encodes the empirical correlation structure from historical returns.
+This vector is used for **both** asset return and volatility processes.
 
 **Step 3: Construct Brownian Increments**
 
-$$\Delta \vec{W}_t^{S,\text{corr}} = \sqrt{\Delta t} \, \vec{Z}_1^{\text{corr}}$$
+Construct Brownian increments for asset returns:
+$$\Delta \vec{W}_t^S = \sqrt{\Delta t} \, \vec{Z}_1^{\text{corr}}$$
 
-$$\Delta \vec{W}_t^v = \rho \sqrt{\Delta t} \, \vec{Z}_1 + \sqrt{1 - \rho^2} \sqrt{\Delta t} \, \vec{Z}_2$$
+Construct Brownian increments for volatility using the **same transformed shocks** to preserve the Heston leverage effect:
+$$\Delta \vec{W}_t^v = \vec{\rho} \odot \sqrt{\Delta t} \, \vec{Z}_1^{\text{corr}} + \sqrt{1 - \vec{\rho}^2} \odot \sqrt{\Delta t} \, \vec{Z}_2$$
 
-**CRITICAL**: The volatility increment $\Delta \vec{W}_t^v$ uses the **original $\vec{Z}_1$** (not $\vec{Z}_1^{\text{corr}}$) to maintain asset-specific Heston leverage effects independently of cross-asset correlations.
+**Key Design Principle**: Both processes use $\vec{Z}_1^{\text{corr}}$, ensuring that:
+
+- **Multi-asset return correlations**: Encoded in the $L$ matrix
+- **Heston leverage effect**: Preserved via correlation $\rho$ within each asset
+- **Cross-asset volatility spillovers**: Modeled through the network matrix $W$ in the variance dynamics
 
 **Step 4: Compute Spatiotemporal Volatility Contagion**
 
@@ -124,7 +132,7 @@ $$\vec{\Theta}_t = \vec{\theta} + \vec{\gamma} \odot (\vec{N}_t - \vec{X}_{t-1})
 
 **Step 5: Update Network Log-Variance (Euler-Maruyama)**
 
-$$\vec{X}_t = \vec{X}_{t-1} + \vec{K} \odot \left( \vec{\Theta}_t - \vec{X}_{t-1} \right) \Delta t + \vec{\xi} \odot \Delta \vec{W}_t^v$$
+$$\vec{X}_t = \vec{X}_{t-1} + \vec{\kappa} \odot \left( \vec{\Theta}_t - \vec{X}_{t-1} \right) \Delta t + \vec{\xi} \odot \Delta \vec{W}_t^v$$
 
 **Step 6: Transform to Real Variance**
 
@@ -138,9 +146,9 @@ Construct the risk-neutral drift with dividend yield adjustment and Itô correct
 
 $$\vec{\mu}_t = \left(\vec{r} - \vec{q} - \frac{1}{2}\vec{V}_{t-1}\right)\Delta t$$
 
-Construct the diffusion component using **correlated Brownian increments**:
+Construct the diffusion component using correlated Brownian increments:
 
-$$\vec{\sigma}_t = \sqrt{\vec{V}_{t-1}} \odot \Delta \vec{W}_t^{S,\text{corr}}$$
+$$\vec{\sigma}_t = \sqrt{\vec{V}_{t-1}} \odot \Delta \vec{W}_t^S$$
 
 Apply the log-normal update:
 
@@ -165,6 +173,7 @@ Backward induction using least squares regression on polynomial basis functions 
 $$V_t(\vec{S}_t, \vec{X}_t) = \max\left\{ \text{Payoff}(S_t), \mathbb{E}[V_{t+1} \mid \vec{S}_t, \vec{X}_t] \right\}$$
 
 The continuation value is projected onto a 4-term or 5-term basis:
+
 - **Constant term**: 1
 - **Log-moneyness**: $\ln(S/K)$
 - **Convexity**: $[\ln(S/K)]^2 - 1$
@@ -173,79 +182,35 @@ The continuation value is projected onto a 4-term or 5-term basis:
 
 ---
 
-### 5. Architecture Overview
+### 5. Workflow & User Inputs
 
-The pipeline consists of two main stages:
+**Required User Inputs:**
 
-**Stage 1: Python Market Data Calibration**
-
-    MarketDataFetcher/
-    ├── get_equity_price_history()
-    │   └── Yahoo Finance ──> cholesky_L_matrix.csv
-    ├── calculate_return_correlation_matrix()
-    │   └── Computes log-return correlation + Cholesky decomposition
-    ├── get_dolthub_iv_history()
-    │   └── DoltHub API ──> calibrated_W_matrix.csv
-    └── generate_sparse_dynamic_W_matrix()
-        └── VAR(1) + Diebold-Yilmaz GFEVD
-
-**Stage 2: C++ Monte Carlo Engine**
-
-    OptionPricingApp/
-    ├── config_loader.h/cpp
-    │   ├── load_cholesky_matrix() ──> Reads cholesky_L_matrix.csv
-    │   └── load_network_weight_matrix() ──> Reads calibrated_W_matrix.csv
-    ├── simulation_config.h
-    │   └── Stores config_.L and config_.W matrices
-    ├── network_simulator.h
-    │   ├── Applies Cholesky transformation: z1_corr = L * z1
-    │   └── Generates correlated paths with independent leverage effects
-    ├── network_pricers.h
-    │   ├── EuropeanPricer: Simple discounted payoff
-    │   └── AmericanPricer: Longstaff-Schwartz LSMC with network basis
-    └── main.cpp
-        └── Orchestrates entire pipeline
+1. **Ticker list** (e.g., `["AAPL", "MSFT", "JPM", ...]`)
+2. **Skeleton network mask** (`skeleton_W_matrix.csv`)
+   - Binary matrix specifying which relationships matter
+   - User provides domain knowledge (Bloomberg terminal, economic reasoning)
+3. **FEVD horizon** (typically 10-20 steps)
+   - Longer horizon = stronger spillover effects
 
 ---
 
-### 6. Key Implementation Details
+### 6. Advantages of Hybrid Approach
 
-**Cholesky Transformation in Simulation Loop** (network_simulator.h, Step 2):
-
-    // Apply Cholesky for correlated asset returns
-    Eigen::VectorXd z1_correlated = config_.L * z1;
-    
-    // Construct correlated Brownian increments for asset returns
-    Eigen::VectorXd dws = sqrt_dt * z1_correlated;
-    
-    // Construct volatility increments using original z1 (maintains independence)
-    Eigen::VectorXd dwv = sqrt_dt * (config_.rho.cwiseProduct(z1) +
-        (1.0 - config_.rho.array().square()).sqrt().matrix().cwiseProduct(z2));
-
-**Key Architectural Principle**: The asset return shocks exhibit empirical correlation structure via $L$, while leverage effects (rho) remain calibrated independently per asset, preventing over-parameterization and ensuring economically interpretable results.
-
-**CSV Loading Logic** (config_loader.cpp):
-
-    - Skips header row (ticker labels)
-    - Parses each data row, skipping first column (index names)
-    - Validates dimensions match num_assets
-    - Returns false if file I/O fails or dimensions mismatch
-
-**LSMC Regression Basis** (network_pricers.h):
-
-    - 4-term basis: [1, ln(S/K), (ln(S/K))^2 - 1, X]
-    - 5-term basis (if network-linked): above + sum_j W_ij * X_j
-    - Uses ColPivHouseholderQR for numerical stability
-    - Adaptive basis selection based on network topology
+- **Domain-aware**: Users encode domain knowledge directly (network structure)
+- **Statistically validated**: Diebold-Yilmaz provides empirical spillover strengths
+- **Parsimonious**: Avoids spurious spillovers by masking irrelevant pairs
+- **Flexible**: Skeleton can be updated based on new Bloomberg terminal data
+- **Interpretable**: Each edge represents an economically meaningful relationship
+- **Robust**: Doesn't require dense historical data for all possible pairs  
 
 ---
 
-### 7. Numerical Features & Safeguards
+### 7. Key Implementation Features
 
 - **Log-Normal Exact Discretization**: Eliminates bias drift for underlying asset paths
 - **Eigenvalue Correction**: Ensures correlation matrix positive semi-definiteness before Cholesky decomposition
 - **Col-Pivot QR for Regression**: Robust least squares solution even when basis functions are nearly collinear
-- **Adaptive Basis Functions**: LSMC automatically includes network spillover term only when asset has active neighbors (W_ij > 0)
+- **Adaptive Basis Functions**: LSMC automatically includes network spillover term only when asset has active neighbors
 - **Row-Stochastic W Matrix**: Ensures economic interpretability of volatility spillovers
-- **Minimum Sample Size Enforcement**: Skips regression if fewer than num_features + 5 ITM paths available
-- **Standard Error Diagnostics**: Rolling output of parameter significance, median betas, and condition numbers
+- **Unified Shock Space**: Both asset returns and volatility leverage use Cholesky-transformed shocks, preserving the Heston framework

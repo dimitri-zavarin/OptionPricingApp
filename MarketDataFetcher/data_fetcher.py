@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from statsmodels.tsa.api import VAR
+import networkx as nx
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 
 def get_equity_price_history(tickers, lookback_days=252):
@@ -173,6 +176,119 @@ def generate_hybrid_W_matrix(price_dataframe, tickers, skeleton_csv="skeleton_W_
     return pd.DataFrame(W_final, index=tickers, columns=tickers)
 
 
+def visualize_network_matrix(W_matrix, tickers, output_filename="W_matrix_network.png", weight_threshold=0.01):
+    """
+    Visualizes the network matrix W as a clean directed graph where line thickness 
+    and opacity dramatically communicate spillover magnitude without text clutter.
+    """
+    print(f"\nGenerating network visualization: {output_filename}...")
+    
+    W_array = W_matrix.values if hasattr(W_matrix, 'values') else W_matrix
+    G = nx.DiGraph()
+    G.add_nodes_from(tickers)
+    
+    for i, recipient in enumerate(tickers):
+        for j, transmitter in enumerate(tickers):
+            if i != j:  
+                weight = W_array[i, j]  # Weight of spillover flowing FROM j TO i
+                if weight >= weight_threshold:  
+                    G.add_edge(transmitter, recipient, weight=weight) # Arrow points j -> i
+    
+    fig, ax = plt.subplots(figsize=(12, 12))
+    pos = nx.circular_layout(G)
+    
+    # 1. Draw Nodes
+    nx.draw_networkx_nodes(G, pos, node_color='#1E3A8A', 
+                           edgecolors='black', linewidths=1.5,
+                           node_size=2400, ax=ax)
+    
+    # Node Ticker Labels
+    nx.draw_networkx_labels(G, pos, font_size=11, font_weight='bold', font_color='white', ax=ax)
+    
+    weights = [G[u][v]['weight'] for u, v in G.edges()]
+    min_w = min(weights) if weights else 0.01
+    max_w = max(weights) if weights else 1.0
+    
+    rad = 0.18  # Uniform curvature
+    
+    # 2. Draw Clean Curved Edges with Scaled Width & Opacity
+    for u, v, data in G.edges(data=True):
+        w = data['weight']
+        p1 = pos[u]
+        p2 = pos[v]
+        
+        # Linear scaling across min_w -> max_w range
+        # Thickness ranges from 0.8px (1% spillover) to 7.5px (dominant spillover)
+        norm_w = (w - min_w) / (max_w - min_w) if max_w > min_w else 0.5
+        linewidth = 0.8 + 6.7 * (norm_w ** 1.2)  # Slight exponent to make high weights pop more
+        
+        # Alpha ranges from 0.35 (subtle) to 0.95 (crisp)
+        alpha = 0.35 + 0.60 * norm_w
+        
+        # Arrowhead size scales slightly with width
+        mutation_scale = 12 + 12 * norm_w
+        
+        arrow = mpatches.FancyArrowPatch(
+            p1, p2,
+            connectionstyle=f"arc3,rad={rad}",
+            arrowstyle="-|>",
+            mutation_scale=mutation_scale,
+            linewidth=linewidth,
+            color="#2563EB" if norm_w > 0.5 else "#4B5563",  # Highlight top-tier edges in blue
+            alpha=alpha,
+            shrinkA=22,
+            shrinkB=22
+        )
+        ax.add_patch(arrow)
+    
+    ax.set_title("Network Volatility Spillover Topology (W)", fontsize=18, fontweight='bold', pad=25)
+    ax.axis('off')
+    
+    # Clean Legend Box
+    legend_text = (
+        f"Edge Threshold: {weight_threshold:.2f}\n"
+        f"Total Active Edges: {len(G.edges())}\n"
+        f"Line Thickness ∝ Spillover Weight\n"
+        f"Blue Lines = Primary Spillovers (>50% max)"
+    )
+    ax.text(0.01, 0.99, legend_text, transform=ax.transAxes, 
+            fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='square,pad=0.5', facecolor='#F8F9FA', edgecolor='#CBD5E1'))
+    
+    plt.tight_layout()
+    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
+    print(f"  ✓ Saved clean network visualization to '{output_filename}'")
+    plt.close()
+
+
+def print_network_statistics(W_matrix, tickers):
+    """
+    Prints statistics about the network structure.
+    """
+    W_array = W_matrix.values if hasattr(W_matrix, 'values') else W_matrix
+    
+    print("\n[NETWORK STATISTICS]")
+    print(f"  Total assets: {len(tickers)}")
+    
+    # Count non-zero edges (excluding self-loops and diagonal)
+    off_diagonal = W_array.copy()
+    np.fill_diagonal(off_diagonal, 0)
+    num_edges = np.sum(off_diagonal > 1e-6)
+    
+    print(f"  Total directed edges (weight > 1e-6): {num_edges}")
+    print(f"  Network density: {num_edges / (len(tickers) * (len(tickers) - 1)):.2%}")
+    
+    # In-degree and out-degree
+    print(f"\n  In-degree (incoming spillovers) and Out-degree (outgoing spillovers):")
+    print(f"  {'Ticker':<10} {'In-Degree':<15} {'Out-Degree':<15}")
+    print(f"  {'-'*40}")
+    
+    for i, ticker in enumerate(tickers):
+        in_degree = np.sum(off_diagonal[:, i] > 1e-6)
+        out_degree = np.sum(off_diagonal[i, :] > 1e-6)
+        print(f"  {ticker:<10} {in_degree:<15} {out_degree:<15}")
+
+
 # --- EXECUTION FLOW ---
 if __name__ == "__main__":
     target_tickers = ["NVDA", "AMD", "AAPL", "MSFT", "GOOG", "AMZN", 
@@ -181,25 +297,33 @@ if __name__ == "__main__":
     try:
         equity_prices = get_equity_price_history(target_tickers, lookback_days=252)
         
-        # 1. Generate and save Cholesky Matrix
+        # Cholesky from returns
         correlation_matrix, cholesky_L = calculate_return_correlation_matrix(equity_prices)
         export_cholesky_matrix_to_csv(cholesky_L, target_tickers, "cholesky_L_matrix.csv")
         
-        # 2. Generate and save Hybrid W Matrix
-        W_matrix = generate_hybrid_W_matrix(
-            price_dataframe=equity_prices, 
-            tickers=target_tickers,
-            skeleton_csv="skeleton_W_matrix.csv",
-            fevd_steps=10
-        )
+        # Network matrix from hybrid approach
+        W_matrix = generate_hybrid_W_matrix(equity_prices, target_tickers, 
+                                            skeleton_csv="skeleton_W_matrix.csv", 
+                                            fevd_steps=10)
         
-        print("\n=== FINAL HYBRID ROW-STOCHASTIC W MATRIX ===")
+        print("\n=== FINAL ROW-STOCHASTIC W MATRIX ===")
         pd.set_option('display.max_columns', None)
         pd.set_option('display.width', 1000)
         print(W_matrix.round(4))
         
         W_matrix.to_csv("calibrated_W_matrix.csv")
         print("\n✓ Saved network matrix to 'calibrated_W_matrix.csv'.")
+        
+        # Visualize the network
+        visualize_network_matrix(W_matrix, target_tickers, 
+                                output_filename="W_matrix_network.png",
+                                weight_threshold=0.01)
+        
+        # Print network statistics
+        print_network_statistics(W_matrix, target_tickers)
+        
+        print("\n" + "="*60)
+        print("PIPELINE COMPLETE")
         print("="*60)
         
     except Exception as e:
