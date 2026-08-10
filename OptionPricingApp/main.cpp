@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <iomanip>
+#include <random>
 #include <Eigen/Dense>
 
 #include "simulation_config.h"
@@ -13,19 +14,19 @@
 /**
  * @brief Executes a single simulation regime, computes option prices, and prints diagnostics.
  */
-void run_regime(const std::string& regime_name, const SimulationConfig& config) {
+void run_regime(const std::string& regime_name, const SimulationConfig& config, bool enable_diagnostics = true) {
     std::cout << "\n==================================================================================================" << std::endl;
     std::cout << " REGIME CONFIGURATION: " << regime_name << std::endl;
     std::cout << "==================================================================================================" << std::endl;
 
-    // --- Print Key Parameters ---
-    std::cout << "--- CRUCIAL STRUCTURAL PARAMETERS ---\n";
-    std::cout << "Ticker    S0        Div (q)   Kappa     Theta     X0        Gamma (Sensitivity)\n";
+    // --- Print Structural Parameters ---
+    std::cout << "--- HESTON NETWORK PARAMETER MATRIX ---\n";
+    std::cout << "Ticker    S0        q         Kappa     Theta     X0        Gamma     Xi        Rho\n";
     std::cout << "--------------------------------------------------------------------------------------------------\n";
     for (int i = 0; i < config.num_assets; ++i) {
-        printf("%-9s %-9.1f %-9.2f %-9.1f %-9.2f %-9.2f %-9.2f\n",
+        printf("%-9s %-9.1f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f\n",
             config.tickers[i].c_str(), config.S0(i), config.q(i), config.kappa(i),
-            config.theta(i), config.X0(i), config.gamma(i));
+            config.theta(i), config.X0(i), config.gamma(i), config.xi(i), config.rho(i));
     }
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
@@ -41,14 +42,13 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config) 
     EuropeanPricer<EuropeanCall> eu_call_pricer(config, asset_paths);
     EuropeanPricer<EuropeanPut>  eu_put_pricer(config, asset_paths);
 
-    AmericanPricer<AmericanCall> am_call_pricer(config, asset_paths, variance_paths, config.W);
-    AmericanPricer<AmericanPut>  am_put_pricer(config, asset_paths, variance_paths, config.W);
+    // Pass enable_diagnostics (verbose) to test standard errors, R^2, and ITM paths
+    AmericanPricer<AmericanCall> am_call_pricer(config, asset_paths, variance_paths, config.W, enable_diagnostics);
+    AmericanPricer<AmericanPut>  am_put_pricer(config, asset_paths, variance_paths, config.W, enable_diagnostics);
 
-    // Using ATM strike for all assets (Assuming S0 = 100 for all)
     double strike = 100.0;
     double maturity = 1.0;
 
-    // Calculate European baseline prices to extract the early-exercise premium
     EuropeanCall eu_call(strike, maturity);
     EuropeanPut  eu_put(strike, maturity);
     Eigen::VectorXd euro_calls = eu_call_pricer.price(eu_call);
@@ -69,8 +69,8 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config) 
     }
 
     // --- 4. Print Final Volatility Surface ---
-    std::cout << "\n--- DERIVATIVES SURFACE VALUATIONS (T = 1.0000 Year) ---\n";
-    std::cout << "Ticker  Euro Call      Raw Amer Call  Call Prem      Euro Put       Raw Amer Put   Put Prem\n";
+    std::cout << "\n--- DERIVATIVES SURFACE VALUATIONS (T = 1.0000 Year, Strike = 100.0) ---\n";
+    std::cout << "Ticker  Euro Call      Amer Call      Call Prem      Euro Put       Amer Put       Put Prem\n";
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
     for (int i = 0; i < config.num_assets; ++i) {
@@ -98,33 +98,30 @@ int main() {
     // --- Base Configuration ---
     SimulationConfig config;
     config.num_assets = num_assets;
-    config.num_paths = 50000; // Lowered from 150k to 50k for speed during 12-asset testing
+    config.num_paths = 50000;
     config.num_steps = 252;
     config.dt = 1.0 / 252.0;
     config.risk_free_rate = 0.04;
     config.tickers = tickers;
 
-    // Standardize initial Heston parameters across all 12 assets
+    // Standardize initial baseline parameters
     config.S0 = Eigen::VectorXd::Constant(num_assets, 100.0);
     config.kappa = Eigen::VectorXd::Constant(num_assets, 2.0);
     config.theta = Eigen::VectorXd::Constant(num_assets, -3.20);
     config.X0 = Eigen::VectorXd::Constant(num_assets, -3.20);
     config.gamma = Eigen::VectorXd::Constant(num_assets, 0.80);
-    config.xi = Eigen::VectorXd::Constant(num_assets, 0.60);    // Vol of vol
-    config.rho = Eigen::VectorXd::Constant(num_assets, -0.70);  // Leverage effect
+    config.xi = Eigen::VectorXd::Constant(num_assets, 0.60);
+    config.rho = Eigen::VectorXd::Constant(num_assets, -0.70);
 
-    // Set Dividends (q) - Assigning basic yields to specific tickers
     config.q = Eigen::VectorXd::Zero(num_assets);
     config.q(2) = 0.05; // AAPL
     config.q(3) = 0.08; // MSFT
     config.q(6) = 0.20; // JPM
     config.q(8) = 0.35; // XOM
 
-    // ========================================================================
-    // FILE I/O: Load Python-Generated Matrices
-    // ========================================================================
+    // --- File I/O: Load Python Matrices ---
     std::string cholesky_file = "cholesky_L_matrix.csv";
-    std::string w_matrix_file = "calibrated_W_matrix.csv"; // Change to calibrated_W_matrix.csv later
+    std::string w_matrix_file = "calibrated_W_matrix.csv";
 
     if (!ConfigLoader::load_matrices_into_config(config, cholesky_file, w_matrix_file)) {
         std::cerr << "\n[FATAL] Exiting simulation due to matrix loading failure.\n";
@@ -132,23 +129,44 @@ int main() {
     }
 
     // ========================================================================
-    // REGIME 1: Baseline Market
-    // Uses standard volatility starts and lets the imported network run neutrally.
+    // REGIME 1: Baseline Market (Verbose Diagnostics = true)
     // ========================================================================
-    run_regime("1. BASELINE MARKET (LOADED TOPOLOGY)", config);
+    run_regime("1. BASELINE MARKET (TESTING DIAGNOSTICS)", config, true);
 
     // ========================================================================
     // REGIME 2: Organic Network Contagion Shock
-    // Instead of hardcoding a cascade, we shock ONE asset (NVDA).
-    // The imported W matrix will automatically route this shock to connected assets!
     // ========================================================================
     SimulationConfig config_cascade = config;
+    config_cascade.X0(0) = -1.00;     // NVDA Volatility Spike
+    config_cascade.theta(0) = -1.00;
 
-    // Inject massive volatility shock to NVDA (Index 0)
-    config_cascade.X0(0) = -1.00;     // Instant volatility spike
-    config_cascade.theta(0) = -1.00;  // Sustain the volatility
+    run_regime("2. NVDA SHOCK PROPAGATING VIA LOADED W MATRIX", config_cascade, false);
 
-    run_regime("2. NVDA SHOCK PROPAGATING VIA LOADED W MATRIX", config_cascade);
+    // ========================================================================
+    // REGIME 3: Fully Heterogeneous (Jumbled) Parameter Basket
+    // Tests how the engine and LSMC regressors react to non-uniform parameters
+    // ========================================================================
+    SimulationConfig config_jumbled = config;
+    std::mt19937 rng(12345); // Fixed seed for reproducible jumbling
+
+    std::uniform_real_distribution<double> dist_s0(80.0, 120.0);
+    std::uniform_real_distribution<double> dist_kappa(0.5, 4.0);
+    std::uniform_real_distribution<double> dist_theta(-4.5, -1.5);
+    std::uniform_real_distribution<double> dist_gamma(0.1, 1.5);
+    std::uniform_real_distribution<double> dist_xi(0.2, 0.9);
+    std::uniform_real_distribution<double> dist_rho(-0.9, -0.2);
+
+    for (int i = 0; i < num_assets; ++i) {
+        config_jumbled.S0(i) = dist_s0(rng);
+        config_jumbled.kappa(i) = dist_kappa(rng);
+        config_jumbled.theta(i) = dist_theta(rng);
+        config_jumbled.X0(i) = config_jumbled.theta(i); // Start at idiosyncratic long-run target
+        config_jumbled.gamma(i) = dist_gamma(rng);
+        config_jumbled.xi(i) = dist_xi(rng);
+        config_jumbled.rho(i) = dist_rho(rng);
+    }
+
+    run_regime("3. FULLY HETEROGENEOUS (JUMBLED) PARAMETER BASKET", config_jumbled, true);
 
     return 0;
 }

@@ -86,6 +86,7 @@ private:
     const std::vector<Eigen::MatrixXd>& asset_paths_;
     const std::vector<Eigen::MatrixXd>& variance_paths_;
     const Eigen::MatrixXd& W_;
+    bool verbose_;
 
     /**
      * @brief Generates an optimized 4-term or 5-term Hermite basis depending on
@@ -113,8 +114,9 @@ public:
     AmericanPricer(const SimulationConfig& cfg,
         const std::vector<Eigen::MatrixXd>& a_paths,
         const std::vector<Eigen::MatrixXd>& v_paths,
-        const Eigen::MatrixXd& W)
-        : config_(cfg), asset_paths_(a_paths), variance_paths_(v_paths), W_(W) {
+        const Eigen::MatrixXd& W,
+        bool verbose = false)
+        : config_(cfg), asset_paths_(a_paths), variance_paths_(v_paths), W_(W), verbose_(verbose) {
     }
 
     double price_asset_option(int asset_idx, const OptionType& opt) const {
@@ -137,10 +139,10 @@ public:
             std::vector<std::string>{"Const", "S", "S^2-1", "X", "Nx_exo"} :
             std::vector<std::string>{ "Const", "S", "S^2-1", "X" };
 
-        // --- Initialize Significance, Standard Error, and Beta Trackers ---
+        // --- Initialize Diagnostic Trackers ---
         std::vector<int> significance_hits(num_features, 0);
-        std::vector<std::vector<double>> se_history(num_features);      // Store all SEs per parameter
-        std::vector<std::vector<double>> beta_history(num_features);    // Store all betas per parameter
+        std::vector<double> r2_history;
+        std::vector<int> itm_history;
         int valid_regressions = 0;
 
         // 1. Initialize Cash Flow vector at T
@@ -194,23 +196,30 @@ public:
             Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(mat_a);
             Eigen::VectorXd beta = qr.solve(vec_y);
             
-            // 6. Rolling Diagnostic: Accumulate Standard Errors, T-Stats, and Beta values
-            Eigen::VectorXd residuals = vec_y - (mat_a * beta);
-            double rss = residuals.squaredNorm();
-            double sigma_squared = rss / (num_itm - static_cast<double>(num_features));
+            // 6. Rolling Diagnostic: R^2, Standard Errors, T-Stats (ONLY IF VERBOSE)
+            if (verbose_) {
+                Eigen::VectorXd residuals = vec_y - (mat_a * beta);
+                double rss = residuals.squaredNorm();
 
-            Eigen::MatrixXd ata = mat_a.transpose() * mat_a;
-            Eigen::MatrixXd cov_matrix = sigma_squared * ata.colPivHouseholderQr().solve(Eigen::MatrixXd::Identity(num_features, num_features));
+                // Calculate R^2
+                double mean_y = vec_y.mean();
+                double tss = (vec_y.array() - mean_y).square().sum();
+                double r_squared = (tss > 0.0) ? (1.0 - (rss / tss)) : 0.0;
+                r2_history.push_back(r_squared);
+                itm_history.push_back(num_itm);
 
-            valid_regressions++;
-            for (int j = 0; j < num_features; ++j) {
-                double se = std::sqrt(std::max(0.0, cov_matrix(j, j)));
-                se_history[j].push_back(se);            // Store standard error
-                beta_history[j].push_back(beta(j));     // Store beta coefficient
+                // Calculate Standard Errors & T-Stats (Heavy Matrix Math)
+                double sigma_squared = rss / (num_itm - static_cast<double>(num_features));
+                Eigen::MatrixXd ata = mat_a.transpose() * mat_a;
+                Eigen::MatrixXd cov_matrix = sigma_squared * ata.colPivHouseholderQr().solve(Eigen::MatrixXd::Identity(num_features, num_features));
 
-                double t_stat = beta(j) / (se + 1e-12); // Prevent div by zero
-                if (std::abs(t_stat) > 1.96) {          // 95% Confidence threshold
-                    significance_hits[j]++;
+                valid_regressions++;
+                for (int j = 0; j < num_features; ++j) {
+                    double se = std::sqrt(std::max(0.0, cov_matrix(j, j)));
+                    double t_stat = beta(j) / (se + 1e-12);
+                    if (std::abs(t_stat) > 1.96) {
+                        significance_hits[j]++;
+                    }
                 }
             }
             
@@ -238,66 +247,37 @@ public:
             }
         }
 
-        // 8. Print the Final Significance, Error, and Beta Summary Block
-        if (valid_regressions > 0) {
+        // 8. Print the Final Significance Summary Block
+        if (verbose_ && valid_regressions > 0) {
             std::string ticker = config_.tickers[asset_idx];
-            std::string payoff = OptionTraits<typename OptionType::Payoff, typename OptionType::Exercise>::payoff_type();
             std::string exercise = OptionTraits<typename OptionType::Payoff, typename OptionType::Exercise>::exercise_type();
-            
-            std::cout << "\n--- OLS Diagnostics (Ticker: " << ticker
-                << " | Type: " << exercise << " " << payoff
-                << " | Asset " << asset_idx
-                << " | " << num_features << "-Term Basis | Valid Regressions: "
-                << valid_regressions << "/" << num_steps - 1 << ") ---" << std::endl;
 
-            std::cout << std::left << std::setw(12) << "Term"
-                << std::setw(18) << "Significance %"
-                << std::setw(15) << "Median Beta"
-                << std::setw(15) << "Median SE"
-                << "Avg SE" << std::endl;
-            std::cout << std::string(75, '-') << std::endl;
+            // Calculate averages for R2 and ITM paths
+            double avg_r2 = 0.0, avg_itm = 0.0;
+            if (!r2_history.empty()) {
+                for (double r2 : r2_history) avg_r2 += r2;
+                avg_r2 /= r2_history.size();
+            }
+            if (!itm_history.empty()) {
+                for (int itm : itm_history) avg_itm += itm;
+                avg_itm /= itm_history.size();
+            }
+
+            std::cout << "\n--- LSMC Diagnostics (Ticker: " << ticker << " | " << exercise << " | " << num_features << "-Term Basis) ---" << std::endl;
+            std::cout << "Valid Regressions : " << valid_regressions << " / " << num_steps - 1 << std::endl;
+            std::cout << "Avg ITM Paths     : " << std::fixed << std::setprecision(0) << avg_itm << std::endl;
+            std::cout << "Avg R-Squared     : " << std::fixed << std::setprecision(4) << avg_r2 << std::endl;
+
+            std::cout << std::string(45, '-') << std::endl;
+            std::cout << std::left << std::setw(20) << "Basis Term" << "Significance (T > 1.96)" << std::endl;
+            std::cout << std::string(45, '-') << std::endl;
 
             for (int j = 0; j < num_features; ++j) {
                 double hit_percentage = (static_cast<double>(significance_hits[j]) / valid_regressions) * 100.0;
-                
-                // Compute median beta
-                std::vector<double> sorted_betas = beta_history[j];
-                std::sort(sorted_betas.begin(), sorted_betas.end());
-                double median_beta;
-                if (sorted_betas.size() % 2 == 0) {
-                    median_beta = (sorted_betas[sorted_betas.size() / 2 - 1] + sorted_betas[sorted_betas.size() / 2]) / 2.0;
-                }
-                else {
-                    median_beta = sorted_betas[sorted_betas.size() / 2];
-                }
-
-                // Compute median SE
-                std::vector<double> sorted_ses = se_history[j];
-                std::sort(sorted_ses.begin(), sorted_ses.end());
-                double median_se;
-                if (sorted_ses.size() % 2 == 0) {
-                    median_se = (sorted_ses[sorted_ses.size() / 2 - 1] + sorted_ses[sorted_ses.size() / 2]) / 2.0;
-                }
-                else {
-                    median_se = sorted_ses[sorted_ses.size() / 2];
-                }
-
-                double avg_se = 0.0;
-                for (double se : se_history[j]) {
-                    avg_se += se;
-                }
-                avg_se /= se_history[j].size();
-
-                std::stringstream ss;
-                ss << std::fixed << std::setprecision(1) << hit_percentage << "%";
-
-                std::cout << std::left << std::setw(12) << term_names[j]
-                    << std::setw(18) << ss.str()
-                    << std::setw(15) << std::fixed << std::setprecision(4) << median_beta
-                    << std::setw(15) << std::fixed << std::setprecision(4) << median_se
-                    << std::fixed << std::setprecision(4) << avg_se << std::endl;
+                std::cout << std::left << std::setw(20) << term_names[j]
+                    << std::fixed << std::setprecision(1) << hit_percentage << "%" << std::endl;
             }
-            std::cout << std::string(75, '-') << "\n" << std::endl;
+            std::cout << std::string(45, '-') << "\n" << std::endl;
         }
 
         cash_flows *= discount_factor;
