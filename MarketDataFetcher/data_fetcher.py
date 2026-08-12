@@ -7,6 +7,7 @@ from statsmodels.tsa.api import VAR
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import statsmodels.api as sm
 
 
 def load_skeleton_and_tickers(skeleton_csv="skeleton_W_matrix.csv"):
@@ -207,6 +208,54 @@ def calculate_kpps_generalized_fevd(var_results, forecast_horizon=10):
     return theta_tilde
 
 
+def fit_constrained_var(iv_dataframe, mask_df, lags=1):
+    """
+    Fits an equation-by-equation Constrained VAR(1) where lag coefficients 
+    for disallowed edges in mask_df are strictly forced to 0.0 during OLS estimation.
+    """
+    tickers = iv_dataframe.columns
+    N = len(tickers)
+    T = len(iv_dataframe) - lags
+    
+    Y = iv_dataframe.iloc[lags:].values
+    X_lag1 = iv_dataframe.shift(1).iloc[lags:].values
+    
+    A1_constrained = np.zeros((N, N))
+    residuals = np.zeros((T, N))
+    
+    for i in range(N):
+        # Identify allowed transmitters into asset i (row i in econometric mask)
+        allowed_indices = np.where(mask_df.iloc[i, :].values == 1.0)[0]
+        
+        X_restricted = X_lag1[:, allowed_indices]
+        X_restricted_with_const = sm.add_constant(X_restricted, has_constant='add')
+        
+        model_i = sm.OLS(Y[:, i], X_restricted_with_const).fit()
+        residuals[:, i] = model_i.resid
+        
+        coeffs = model_i.params[1:]
+        for idx, col_idx in enumerate(allowed_indices):
+            A1_constrained[i, col_idx] = coeffs[idx]
+            
+    sigma_u = np.cov(residuals, rowvar=False)
+    
+    class ConstrainedVARResults:
+        def __init__(self, A1, sigma_u):
+            self.A1 = A1
+            self.sigma_u = type('SigmaU', (), {'values': sigma_u})()
+            self.N = A1.shape[0]
+            
+        def ma_rep(self, maxn=10):
+            A_ma = np.zeros((maxn, self.N, self.N))
+            A_curr = np.eye(self.N)
+            for h in range(maxn):
+                A_ma[h] = A_curr
+                A_curr = A_curr @ self.A1
+            return A_ma
+
+    return ConstrainedVARResults(A1_constrained, sigma_u)
+
+
 def generate_hybrid_W_matrix(iv_dataframe, tickers, mask_df, fevd_steps=10):
     """
     Builds the W matrix by combining a structural binary mask (skeleton) 
@@ -219,14 +268,13 @@ def generate_hybrid_W_matrix(iv_dataframe, tickers, mask_df, fevd_steps=10):
     N = len(tickers)
     mask = mask_df.values
     
-    print("  → Fitting VAR(1) model to Implied Volatilities...")
-    model = VAR(iv_dataframe)
-    results = model.fit(maxlags=1)
+    print("  → Fitting Structurally Constrained VAR(1) to Implied Volatilities...")
+    constrained_results = fit_constrained_var(iv_dataframe, mask_df, lags=1)
     
-    print(f"  → Computing KPPS Generalized Forecast Error Variance Decomposition (Steps={fevd_steps})...")
-    dy_matrix = calculate_kpps_generalized_fevd(results, forecast_horizon=fevd_steps)
+    print(f"  → Computing KPPS Generalized FEVD on Constrained VAR (Steps={fevd_steps})...")
+    dy_matrix = calculate_kpps_generalized_fevd(constrained_results, forecast_horizon=fevd_steps)
     
-    print("  → Applying structural prior mask to DY spillovers...")
+    print("  → Applying structural prior mask to zero out non-supply-chain residual noise...")
     W_filtered = dy_matrix * mask
 
     min_threshold = 0.01  # 1% minimum spillover
