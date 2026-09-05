@@ -146,6 +146,7 @@
     <ClInclude Include="option.h" />
     <ClInclude Include="binomial.h" />
     <ClInclude Include="simulation_config.h" />
+    <ClInclude Include="simulation_runner.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

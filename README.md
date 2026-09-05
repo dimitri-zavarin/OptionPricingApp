@@ -33,7 +33,7 @@ $$d\vec{W}_t^v = \vec{\rho} \odot L \, d\vec{Z}_1 + \sqrt{1 - \vec{\rho}^2} \odo
 * $\vec{\gamma}$: $N \times 1$ network volatility sensitivity vector.
 * $W$: $N \times N$ directed network edge weight matrix (rows normalized to sum to 1).
 * $\vec{\xi}$: $N \times 1$ volatility-of-volatility vector.
-* $\vec{\rho}$: $N \times 1$ vector of asset-specific leverage correlations $\in [-1, 1]$ (each element represents return-variance correlation for that asset).
+* $\vec{\rho}$: $N \times 1$ vector of asset-specific leverage correlations $\in [-1, 1]$.
 * $\Sigma$: $N \times N$ empirical correlation matrix of equity log-returns.
 * $L$: $N \times N$ lower triangular Cholesky decomposition matrix such that $\Sigma = LL^T$.
 
@@ -41,26 +41,26 @@ $$d\vec{W}_t^v = \vec{\rho} \odot L \, d\vec{Z}_1 + \sqrt{1 - \vec{\rho}^2} \odo
 
 ### 2. Calibration Pipeline
 
-#### 2.1 Hybrid Approach: Structural Mask + Statistical Weighting
+#### 2.1 Two-Stage Hybrid Approach: Structural Constraints + Statistical Weighting
 
-The `MarketDataFetcher/data_fetcher.py` pipeline combines **domain knowledge** (user-provided network structure) with **statistical validation** (Diebold-Yilmaz FEVD):
+The `MarketDataFetcher/data_fetcher.py` pipeline combines **domain knowledge** (user-provided network structure) with **statistical validation** (constrained VAR-based spillover coefficients):
 
 **Stage 1: Equity Return Correlations (Cholesky Decomposition)**
 
-1. **Fetch historical equity prices** from Yahoo Finance for the $N$ assets over a lookback window (typically 252 trading days)
-2. **Compute log-returns**: $r_{i,t} = \ln(P_{i,t} / P_{i,t-1})$ for each asset $i$
-3. **Calculate correlation matrix**: $\Sigma = \text{Corr}(\{r_{i,t}\})$ (Pearson correlation of returns)
-4. **Ensure positive semi-definiteness** via eigenvalue correction if numerical instabilities exist
-5. **Compute Cholesky decomposition**: $L = \text{cholesky}(\Sigma)$ such that $\Sigma = LL^T$
-6. **Export to CSV**: `cholesky_L_matrix.csv` (lower triangular $N \times N$ matrix)
+1. Fetch historical equity prices from Yahoo Finance for the $N$ assets (typically 252 trading days)
+2. Compute log-returns: $r_{i,t} = \ln(P_{i,t} / P_{i,t-1})$
+3. Calculate correlation matrix: $\Sigma = \text{Corr}(\{r_{i,t}\})$
+4. Ensure positive semi-definiteness via eigenvalue correction
+5. Compute Cholesky decomposition: $L = \text{cholesky}(\Sigma)$
+6. Export to `cholesky_L_matrix.csv`
 
-**Stage 2: Network Structure via Mask + Diebold-Yilmaz Weighting**
+**Stage 2: Network Structure via Constrained VAR(1)**
 
-The framework uses a **two-step hybrid approach** to construct the directed network matrix $W$:
+The framework uses a **three-step process** to construct the directed network matrix $W$:
 
-**Step 2a: User-Defined Structural Mask** (Binary, Non-stochastic)
+**Step 2a: User-Defined Structural Mask** (Binary, Domain-Knowledge)
 
-User creates `skeleton_W_matrix.csv` specifying which relationships are economically meaningful:
+User creates `skeleton_W_matrix.csv` as an edge list or adjacency matrix specifying which economic relationships are meaningful:
 
 ```
 From,To
@@ -69,15 +69,25 @@ A,C
 B,C
 ```
 
-**Step 2b: Statistical Weighting (Diebold-Yilmaz)**
+This prevents spurious empirical correlations that lack economic justification.
 
-1. **Fetch historical implied volatility (IV) data** from DoltHub for the same $N$ assets
-2. **Fit a VAR(1) model** to the IV time series
-3. **Calculate Generalized Forecast Error Variance Decomposition (GFEVD)** using the Diebold-Yilmaz methodology
-4. **Merge with Structural Mask**: Combine user-defined binary relationships with Diebold-Yilmaz weights
-5. **Enforce sparsity**: retain only top $K$ neighbors per asset (typically $K=3$) to optimize computational efficiency
-6. **Ensure row-stochasticity**: normalize each row to sum to 1.0
-7. **Export to CSV**: `calibrated_W_matrix.csv` (row-normalized $N \times N$ matrix)
+**Step 2b: Constrained VAR(1) Coefficient Extraction**
+
+1. Fetch historical implied volatility (IV) data from DoltHub for the same $N$ assets
+2. Fit a **Constrained VAR(1) model** to IV changes where:
+   - Only relationships allowed by the skeleton mask receive non-zero coefficients
+   - Disallowed edges are exactly 0 during OLS estimation
+3. Extract the VAR(1) coefficient matrix $A_1$
+4. Take absolute values: $W_{\text{raw}} = |A_1|$ (spillovers are magnitudes)
+5. Apply small threshold to remove numerical noise: $W_{\text{raw}}[W_{\text{raw}} < 0.001] = 0$
+6. Normalize rows: $W[i,:] = W_{\text{raw}}[i,:] / \sum_j W_{\text{raw}}[i,j]$ (row-stochastic)
+7. Export to `calibrated_W_matrix.csv`
+
+**Interpretation**: The VAR(1) coefficient $A_1[i,j]$ represents the average effect of a 1-unit shock in asset $j$'s IV on asset $i$'s IV one step ahead, **subject to the structural constraint imposed by the skeleton**. This ensures:
+
+- ✅ Structural integrity: Only skeleton-approved relationships can have non-zero effects
+- ✅ Statistical grounding: Weights reflect actual historical IV spillover dynamics  
+- ✅ Simplicity: VAR is the standard econometric tool for multivariate time-series
 
 #### 2.2 Data Separation Rationale
 
@@ -85,132 +95,90 @@ The framework uses **two distinct data sources** to model complementary phenomen
 
 | Matrix | Data Source | Mechanism | Purpose |
 |--------|-------------|-----------|---------|
-| **L** (Cholesky) | Equity prices (log-returns) | Direct contemporaneous correlation | Captures fundamental business cycle synchronization; affects immediate price co-movements |
-| **W** (Network) | Implied volatility (IV) | Spillover amplification | Captures volatility clustering and regimes; affects volatility contagion across assets |
+| **L** (Cholesky) | Equity prices (log-returns) | Return correlations | Fundamental business cycle synchronization; immediate price co-movements |
+| **W** (Network) | Implied volatility (IV) | Spillover contagion | Volatility clustering, regimes, and cross-asset propagation |
 
 ---
 
 ### 3. Discretization & Path Simulation Algorithm
 
-To generate discrete Monte Carlo paths, the continuous-time system is approximated over $T$ time steps using an Euler-Maruyama scheme for the log-variance process and an exact exponential time-stepping solution for the asset prices.
-
 Given initial conditions $\vec{S}_0$ and $\vec{X}_0$, for each time step $t \in \{1, 2, \dots, T\}$:
 
 **Step 1: Generate Independent Standard Normal Shocks**
 
-Generate two independent standard normal vectors:
 $$\vec{Z}_1, \vec{Z}_2 \sim \mathcal{N}(\vec{0}, I_N)$$
 
 **Step 2: Apply Cholesky Transformation**
 
-Transform the independent shocks via the Cholesky matrix to induce multi-asset return correlations:
 $$\vec{Z}_1^{\text{corr}} = L \, \vec{Z}_1$$
 
 This vector is used for **both** asset return and volatility processes.
 
 **Step 3: Construct Brownian Increments**
 
-Construct Brownian increments for asset returns:
 $$\Delta \vec{W}_t^S = \sqrt{\Delta t} \, \vec{Z}_1^{\text{corr}}$$
 
-Construct Brownian increments for volatility using the **same transformed shocks** to preserve the Heston leverage effect:
 $$\Delta \vec{W}_t^v = \vec{\rho} \odot \sqrt{\Delta t} \, \vec{Z}_1^{\text{corr}} + \sqrt{1 - \vec{\rho}^2} \odot \sqrt{\Delta t} \, \vec{Z}_2$$
-
-**Key Design Principle**: Both processes use $\vec{Z}_1^{\text{corr}}$, ensuring that:
-
-- **Multi-asset return correlations**: Encoded in the $L$ matrix
-- **Heston leverage effect**: Preserved via correlation $\rho$ within each asset
-- **Cross-asset volatility spillovers**: Modeled through the network matrix $W$ in the variance dynamics
 
 **Step 4: Compute Spatiotemporal Volatility Contagion**
 
-Evaluate the network-weighted volatility spillover:
 $$\vec{N}_t = W\vec{X}_{t-1}$$
 
-Compute the dynamic mean-reversion target incorporating both idiosyncratic and network-driven components:
 $$\vec{\Theta}_t = \vec{\theta} + \vec{\gamma} \odot (\vec{N}_t - \vec{X}_{t-1})$$
 
 **Step 5: Update Network Log-Variance (Euler-Maruyama)**
 
 $$\vec{X}_t = \vec{X}_{t-1} + \vec{\kappa} \odot \left( \vec{\Theta}_t - \vec{X}_{t-1} \right) \Delta t + \vec{\xi} \odot \Delta \vec{W}_t^v$$
 
-**Step 6: Transform to Real Variance**
+**Step 6: Update Asset Prices (Exact Solution)**
 
-$$\vec{V}_{t-1} = \exp(\vec{X}_{t-1})$$
-
-Exponential transformation guarantees strict positivity: $\vec{V}_{t-1} > 0$.
-
-**Step 7: Update Asset Prices (Exact Log-Normal Discretization)**
-
-Construct the risk-neutral drift with dividend yield adjustment and Itô correction:
-
-$$\vec{\mu}_t = \left(\vec{r} - \vec{q} - \frac{1}{2}\vec{V}_{t-1}\right)\Delta t$$
-
-Construct the diffusion component using correlated Brownian increments:
-
-$$\vec{\sigma}_t = \sqrt{\vec{V}_{t-1}} \odot \Delta \vec{W}_t^S$$
-
-Apply the log-normal update:
-
-$$\vec{S}_t = \vec{S}_{t-1} \odot \exp(\vec{\mu}_t + \vec{\sigma}_t)$$
-
-This exact discretization ensures all simulated prices remain strictly positive and achieves zero structural drift for the asset GBM.
+$$\vec{S}_t = \vec{S}_{t-1} \odot \exp\left[ \left( \vec{r} - \vec{q} - \frac{1}{2}\exp(\vec{X}_{t-1}) \right) \Delta t + \sqrt{\exp(\vec{X}_{t-1})} \odot \Delta \vec{W}_t^S \right]$$
 
 ---
 
-### 4. Pricing Methods
+### 4. Option Pricing: Longstaff-Schwartz American Pricer
 
-#### 4.1 European Options
+For American options, we employ the **Longstaff-Schwartz (LS) regression method** with **adaptive basis functions**:
 
-Simple discounted expectation over all Monte Carlo paths:
+**Basis Function Selection**:
 
-$$C_{\text{Euro}}^0 = e^{-r T} \mathbb{E}[C(S_T, K)]$$
+- **4-term basis** (isolated assets): constant, log-moneyness, convexity, local variance
+- **5-term basis** (networked assets): adds network variance contagion term $N_{x,\text{exo}}(t) = \sum_{j \neq i} W[i,j] \cdot X_j(t)$
 
-#### 4.2 American Options (Longstaff-Schwartz LSMC)
-
-Backward induction using least squares regression on polynomial basis functions that include network effects:
-
-$$V_t(\vec{S}_t, \vec{X}_t) = \max\left\{ \text{Payoff}(S_t), \mathbb{E}[V_{t+1} \mid \vec{S}_t, \vec{X}_t] \right\}$$
-
-The continuation value is projected onto a 4-term or 5-term basis:
-
-- **Constant term**: 1
-- **Log-moneyness**: $\ln(S/K)$
-- **Convexity**: $[\ln(S/K)]^2 - 1$
-- **Local volatility**: $X_t$ (log-variance state)
-- **Network spillover** (if active): $\sum_j W_{ij} X_{j,t}$ (weighted sum of neighbor variances)
+The basis adapts dynamically based on whether an asset receives spillover inputs from neighbors.
 
 ---
 
-### 5. Workflow & User Inputs
+### 5. C++ Simulation Engine
 
-**Required User Inputs:**
+The `OptionPricingApp/` directory contains the production engine:
 
-1. **Ticker list** (e.g., `["AAPL", "MSFT", "JPM", ...]`)
-2. **Skeleton network mask** (`skeleton_W_matrix.csv`)
-   - Binary matrix specifying which relationships matter
-   - User provides domain knowledge (Bloomberg terminal, economic reasoning)
-3. **FEVD horizon** (typically 10-20 steps)
-   - Longer horizon = stronger spillover effects
-
----
-
-### 6. Advantages of Hybrid Approach
-
-- **Domain-aware**: Users encode domain knowledge directly (network structure)
-- **Statistically validated**: Diebold-Yilmaz provides empirical spillover strengths
-- **Parsimonious**: Avoids spurious spillovers by masking irrelevant pairs
-- **Flexible**: Skeleton can be updated based on new Bloomberg terminal data
-- **Interpretable**: Each edge represents an economically meaningful relationship
-- **Robust**: Doesn't require dense historical data for all possible pairs  
+- `network_simulator.h/cpp`: Monte Carlo path generator with Cholesky correlations and network spillovers
+- `network_pricers.h`: Template-based `EuropeanPricer` and `AmericanPricer` classes
+- `simulation_runner.h`: Unified wrapper for batch simulation and pricing
+- `option.h`: Payoff definitions (Call/Put × European/American)
+- `simulation_config.h`: Centralized parameter management
 
 ---
 
-### 7. Key Implementation Features
+### 6. Workflow Example
 
-- **Log-Normal Exact Discretization**: Eliminates bias drift for underlying asset paths
-- **Eigenvalue Correction**: Ensures correlation matrix positive semi-definiteness before Cholesky decomposition
-- **Col-Pivot QR for Regression**: Robust least squares solution even when basis functions are nearly collinear
-- **Adaptive Basis Functions**: LSMC automatically includes network spillover term only when asset has active neighbors
-- **Row-Stochastic W Matrix**: Ensures economic interpretability of volatility spillovers
-- **Unified Shock Space**: Both asset returns and volatility leverage use Cholesky-transformed shocks, preserving the Heston framework
+**Step 1: Generate calibration matrices**
+
+cd MarketDataFetcher python data_fetcher.py
+
+**Outputs: cholesky_L_matrix.csv, calibrated_W_matrix.csv, W_matrix_network.png**
+
+**Step 2: Build and run the pricer**
+
+cd ../OptionPricingApp cmake -B build && cmake --build build --config Release ./build/OptionPricingApp.exe
+
+---
+
+### 7. References
+
+**Model Inspiration**:
+
+- Heston (1993): Stochastic volatility
+- Diebold & Yilmaz (2012): Spillover indices (theoretical foundation for $W$ construction)
+- Longstaff & Schwartz (2001): Regression-based American option pricing

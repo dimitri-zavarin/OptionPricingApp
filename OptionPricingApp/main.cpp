@@ -2,19 +2,23 @@
 #include <vector>
 #include <string>
 #include <iomanip>
-#include <random>
+#include <cstdio>
 #include <Eigen/Dense>
 
 #include "simulation_config.h"
-#include "option.h"
 #include "network_simulator.h"
 #include "network_pricers.h"
 #include "config_loader.h"
+#include "simulation_runner.h"
 
 /**
- * @brief Executes a single simulation regime, computes option prices, and prints diagnostics.
+ * @brief Prints a formatted table of option prices from simulation results.
  */
-void run_regime(const std::string& regime_name, const SimulationConfig& config, bool enable_diagnostics = true) {
+void print_results(const std::string& regime_name,
+                   const SimulationConfig& config_,
+                   const SimulationResults& results_,
+                   double strike_,
+                   double maturity_) {
     std::cout << "\n==================================================================================================" << std::endl;
     std::cout << " REGIME CONFIGURATION: " << regime_name << std::endl;
     std::cout << "==================================================================================================" << std::endl;
@@ -23,63 +27,31 @@ void run_regime(const std::string& regime_name, const SimulationConfig& config, 
     std::cout << "--- HESTON NETWORK PARAMETER MATRIX ---\n";
     std::cout << "Ticker    S0        q         Kappa     Theta     X0        Gamma     Xi        Rho\n";
     std::cout << "--------------------------------------------------------------------------------------------------\n";
-    for (int i = 0; i < config.num_assets; ++i) {
+    for (int i = 0; i < config_.num_assets; ++i) {
         printf("%-9s %-9.1f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f %-9.2f\n",
-            config.tickers[i].c_str(), config.S0(i), config.q(i), config.kappa(i),
-            config.theta(i), config.X0(i), config.gamma(i), config.xi(i), config.rho(i));
+            config_.tickers[i].c_str(), config_.S0(i), config_.q(i), config_.kappa(i),
+            config_.theta(i), config_.X0(i), config_.gamma(i), config_.xi(i), config_.rho(i));
     }
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
-    // --- 1. Simulate Paths ---
-    std::cout << "\n[System] Spinning up Heston Network Simulator (" << config.num_paths << " paths)...\n";
-    NetworkSimulator sim(config, 42); // Fixed seed for reproducible diagnostics
-    sim.simulate();
-
-    const auto& asset_paths = sim.get_asset_paths();
-    const auto& variance_paths = sim.get_log_variance_paths();
-
-    // --- 2. Initialize Pricers ---
-    EuropeanPricer<EuropeanCall> eu_call_pricer(config, asset_paths);
-    EuropeanPricer<EuropeanPut>  eu_put_pricer(config, asset_paths);
-
-    // Pass enable_diagnostics (verbose) to test standard errors, R^2, and ITM paths
-    AmericanPricer<AmericanCall> am_call_pricer(config, asset_paths, variance_paths, config.W, enable_diagnostics);
-    AmericanPricer<AmericanPut>  am_put_pricer(config, asset_paths, variance_paths, config.W, enable_diagnostics);
-
-    double strike = 100.0;
-    double maturity = 1.0;
-
-    EuropeanCall eu_call(strike, maturity);
-    EuropeanPut  eu_put(strike, maturity);
-    Eigen::VectorXd euro_calls = eu_call_pricer.price(eu_call);
-    Eigen::VectorXd euro_puts = eu_put_pricer.price(eu_put);
-
-    // --- 3. Run Longstaff-Schwartz American Regressions ---
-    std::cout << "\n[System] Executing Spatiotemporal Longstaff-Schwartz Regressions...\n";
-
-    std::vector<double> amer_calls(config.num_assets);
-    std::vector<double> amer_puts(config.num_assets);
-
-    for (int i = 0; i < config.num_assets; ++i) {
-        AmericanCall am_call(strike, maturity);
-        AmericanPut  am_put(strike, maturity);
-
-        amer_calls[i] = am_call_pricer.price_asset_option(i, am_call);
-        amer_puts[i] = am_put_pricer.price_asset_option(i, am_put);
-    }
-
-    // --- 4. Print Final Volatility Surface ---
-    std::cout << "\n--- DERIVATIVES SURFACE VALUATIONS (T = 1.0000 Year, Strike = 100.0) ---\n";
+    // --- Print Option Prices ---
+    std::cout << "\n--- DERIVATIVES SURFACE VALUATIONS (T = " << std::fixed << std::setprecision(4) 
+              << maturity_ << " Year, Strike = " << strike_ << ") ---\n";
     std::cout << "Ticker  Euro Call      Amer Call      Call Prem      Euro Put       Amer Put       Put Prem\n";
     std::cout << "--------------------------------------------------------------------------------------------------\n";
 
-    for (int i = 0; i < config.num_assets; ++i) {
-        double c_prem = amer_calls[i] - euro_calls(i);
-        double p_prem = amer_puts[i] - euro_puts(i);
+    for (int i = 0; i < config_.num_assets; ++i) {
+        double c_prem = results_.american_call_prices[i] - results_.european_call_prices(i);
+        double p_prem = results_.american_put_prices[i] - results_.european_put_prices(i);
 
         printf("%-7s %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f\n",
-            config.tickers[i].c_str(), euro_calls(i), amer_calls[i], c_prem,
-            euro_puts(i), amer_puts[i], p_prem);
+            config_.tickers[i].c_str(),
+            results_.european_call_prices(i),
+            results_.american_call_prices[i],
+            c_prem,
+            results_.european_put_prices(i),
+            results_.american_put_prices[i],
+            p_prem);
     }
 }
 
@@ -90,7 +62,6 @@ int main() {
     std::cout << "=================================================================\n";
 
     int num_assets = 11;
-    // Updated to match the exact order generated by data_fetcher.py
     std::vector<std::string> tickers = {
         "AAPL", "CRUS", "SWKS", "BBY", "MU", "QRVO", "NVDA", "SMCI", "MPWR", "AVT", "AMAT"
     };
@@ -114,11 +85,10 @@ int main() {
     config.rho = Eigen::VectorXd::Constant(num_assets, -0.70);
 
     config.q = Eigen::VectorXd::Zero(num_assets);
-    // Adjusted dividends for the new 11-asset basket
-    config.q(0) = 0.05; // AAPL
-    config.q(4) = 0.02; // MU
-    config.q(6) = 0.00; // NVDA
-    config.q(10) = 0.03; // AMAT
+    config.q(0) = 0.05;   // AAPL
+    config.q(4) = 0.02;   // MU
+    config.q(6) = 0.00;   // NVDA
+    config.q(10) = 0.03;  // AMAT
 
     // --- File I/O: Load Python Matrices ---
     std::string cholesky_file = "cholesky_L_matrix.csv";
@@ -132,55 +102,18 @@ int main() {
     // ========================================================================
     // REGIME 1: Baseline Market (Stable parameters, no localized shocks)
     // ========================================================================
-    run_regime("1. BASELINE MARKET (STABLE PARAMETERS)", config, false);
+    SimulationResults baseline_results = SimulationRunner::run_simulation(config, 100.0, 1.0, 42, false);
+    print_results("1. BASELINE MARKET (STABLE PARAMETERS)", config, baseline_results, 100.0, 1.0);
 
     // ========================================================================
     // REGIME 2: The Volatility Injection Case (Apple Anchors Down)
-    // AAPL (Index 0) experiences a massive volatility spike.
-    // We expect this to rapidly infect CRUS, SWKS, and QRVO via network spillovers.
     // ========================================================================
     SimulationConfig config_injection = config;
     config_injection.X0(0) = -1.00;     // AAPL massive immediate volatility spike
     config_injection.theta(0) = -1.00;  // AAPL massive long-term structural volatility
 
-    run_regime("2. VOLATILITY INJECTION (AAPL SHOCKS THE NETWORK)", config_injection, true);
-
-    // ========================================================================
-    // REGIME 3: The Volatility Sink Case (Cirrus Logic Isolated Shock)
-    // CRUS (Index 1) experiences extreme volatility, but because it transmits
-    // almost nothing out, the rest of the network should remain completely stable.
-    // ========================================================================
-    SimulationConfig config_sink = config;
-    config_sink.X0(1) = 0.00;     // CRUS catastrophic volatility spike
-    config_sink.theta(1) = 0.00;
-    config_sink.xi(1) = 1.20;     // Extreme vol-of-vol
-
-    run_regime("3. VOLATILITY SINK (CRUS ISOLATED CATASTROPHE)", config_sink, true);
-
-    // ========================================================================
-    // REGIME 4: Fully Heterogeneous (Jumbled) Parameter Basket
-    // ========================================================================
-    SimulationConfig config_jumbled = config;
-    std::mt19937 rng(12345); // Fixed seed for reproducible jumbling
-
-    std::uniform_real_distribution<double> dist_s0(80.0, 120.0);
-    std::uniform_real_distribution<double> dist_kappa(0.5, 4.0);
-    std::uniform_real_distribution<double> dist_theta(-4.5, -1.5);
-    std::uniform_real_distribution<double> dist_gamma(0.1, 1.5);
-    std::uniform_real_distribution<double> dist_xi(0.2, 0.9);
-    std::uniform_real_distribution<double> dist_rho(-0.9, -0.2);
-
-    for (int i = 0; i < num_assets; ++i) {
-        config_jumbled.S0(i) = dist_s0(rng);
-        config_jumbled.kappa(i) = dist_kappa(rng);
-        config_jumbled.theta(i) = dist_theta(rng);
-        config_jumbled.X0(i) = config_jumbled.theta(i); // Start at idiosyncratic long-run target
-        config_jumbled.gamma(i) = dist_gamma(rng);
-        config_jumbled.xi(i) = dist_xi(rng);
-        config_jumbled.rho(i) = dist_rho(rng);
-    }
-
-    run_regime("4. FULLY HETEROGENEOUS (JUMBLED) PARAMETER BASKET", config_jumbled, false);
+    SimulationResults injection_results = SimulationRunner::run_simulation(config_injection, 100.0, 1.0, 42, true);
+    print_results("2. VOLATILITY INJECTION (AAPL SHOCKS THE NETWORK)", config_injection, injection_results, 100.0, 1.0);
 
     return 0;
 }

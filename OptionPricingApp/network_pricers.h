@@ -283,4 +283,18 @@ public:
         cash_flows *= discount_factor;
         return cash_flows.mean();
     }
+
+    /**
+     * @brief Prices options for all assets and returns results as a vector.
+     * 
+     * @param opt Option specification for pricing
+     * @return Eigen::VectorXd with prices for each asset
+     */
+    Eigen::VectorXd price(const OptionType& opt) const {
+        Eigen::VectorXd prices(config_.num_assets);
+        for (int i = 0; i < config_.num_assets; ++i) {
+            prices(i) = price_asset_option(i, opt);
+        }
+        return prices;
+    }
 };

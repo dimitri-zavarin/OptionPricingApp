@@ -56,5 +56,8 @@
     <ClInclude Include="config_loader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="simulation_runner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

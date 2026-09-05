@@ -170,48 +170,15 @@ def export_cholesky_matrix_to_csv(cholesky_L, tickers, output_filename="cholesky
     print(f"\n✓ Exported Cholesky decomposition matrix L to '{output_filename}'")
 
 
-def calculate_kpps_generalized_fevd(var_results, forecast_horizon=10):
-    """
-    Implements the Generalized Forecast Error Variance Decomposition (KPPS)
-    from Diebold & Yilmaz (2012) to ensure results are invariant to variable ordering.
-    """
-    sigma_u = var_results.sigma_u.values
-    N = sigma_u.shape[0]
-    A = var_results.ma_rep(maxn=forecast_horizon)
-
-    theta = np.zeros((N, N))
-
-    for i in range(N):
-        for j in range(N):
-            numerator = 0.0
-            denominator = 0.0
-            sigma_jj = sigma_u[j, j]
-
-            e_i = np.zeros(N)
-            e_i[i] = 1.0
-            e_j = np.zeros(N)
-            e_j[j] = 1.0
-
-            for h in range(forecast_horizon):
-                A_h = A[h]
-                term_num = np.dot(np.dot(e_i, A_h), np.dot(sigma_u, e_j))
-                numerator += (term_num ** 2) / sigma_jj
-
-                term_den_matrix = np.dot(np.dot(A_h, sigma_u), A_h.T)
-                term_den = np.dot(np.dot(e_i, term_den_matrix), e_i)
-                denominator += term_den
-
-            theta[i, j] = numerator / denominator
-
-    # Normalize by row sum to enforce row-stochastic boundaries
-    theta_tilde = theta / theta.sum(axis=1, keepdims=True)
-    return theta_tilde
-
-
 def fit_constrained_var(iv_dataframe, mask_df, lags=1):
     """
     Fits an equation-by-equation Constrained VAR(1) where lag coefficients 
     for disallowed edges in mask_df are strictly forced to 0.0 during OLS estimation.
+    
+    @param iv_dataframe: Time series of implied volatilities
+    @param mask_df: Binary mask where 1.0 indicates allowed relationships
+    @param lags: Number of lags (default: 1)
+    @return: ConstrainedVARResults object with coefficients and residual covariance
     """
     tickers = iv_dataframe.columns
     N = len(tickers)
@@ -256,38 +223,37 @@ def fit_constrained_var(iv_dataframe, mask_df, lags=1):
     return ConstrainedVARResults(A1_constrained, sigma_u)
 
 
-def generate_hybrid_W_matrix(iv_dataframe, tickers, mask_df, fevd_steps=10):
+def generate_hybrid_W_matrix(iv_dataframe, tickers, mask_df, lags=1):
     """
-    Builds the W matrix by combining a structural binary mask (skeleton) 
-    with dynamic edge weights from a Diebold-Yilmaz VAR KPPS FEVD on IV data.
+    Use constrained VAR(1) coefficients as spillover weights.
+    Skeleton mask is applied during fitting, so we get pure structural constraints.
     """
-    print(f"\nBuilding Hybrid W matrix using structural prior and DoltHub IV data...")
+    print(f"\nBuilding W matrix from Constrained VAR(1) coefficients...")
     
-    # Ensure IV dataframe columns exactly match our target tickers
     iv_dataframe = iv_dataframe[tickers]
     N = len(tickers)
-    mask = mask_df.values
     
-    print("  → Fitting Structurally Constrained VAR(1) to Implied Volatilities...")
+    print("  ✓ Fitting Structurally Constrained VAR(1)...")
     constrained_results = fit_constrained_var(iv_dataframe, mask_df, lags=1)
     
-    print(f"  → Computing KPPS Generalized FEVD on Constrained VAR (Steps={fevd_steps})...")
-    dy_matrix = calculate_kpps_generalized_fevd(constrained_results, forecast_horizon=fevd_steps)
+    # Get the VAR coefficient matrix (already has skeleton applied)
+    A1 = constrained_results.A1
     
-    print("  → Applying structural prior mask to zero out non-supply-chain residual noise...")
-    W_filtered = dy_matrix * mask
-
-    min_threshold = 0.01  # 1% minimum spillover
-    W_filtered[W_filtered < min_threshold] = 0.0
+    # Take absolute values (spillovers are magnitudes)
+    W_raw = np.abs(A1)
     
+    # Apply small threshold to remove numerical noise
+    W_raw[W_raw < 0.001] = 0.0
+    
+    # Normalize to row-stochastic
     W_final = np.zeros((N, N))
     for i in range(N):
-        row_sum = np.sum(W_filtered[i, :])
+        row_sum = np.sum(W_raw[i, :])
         if row_sum > 1e-9:
-            W_final[i, :] = W_filtered[i, :] / row_sum
+            W_final[i, :] = W_raw[i, :] / row_sum
         else:
             W_final[i, i] = 1.0
-            
+    
     return pd.DataFrame(W_final, index=tickers, columns=tickers)
 
 
