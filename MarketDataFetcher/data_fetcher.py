@@ -367,7 +367,7 @@ if __name__ == "__main__":
         # 4. Generate hybrid W matrix using parsed mask & DoltHub IVs
         W_matrix = generate_hybrid_W_matrix(real_market_ivs, target_tickers, 
                                             mask_df=structural_mask_df, 
-                                            fevd_steps=10)
+                                            lags=1)
         
         print("\n=== FINAL ROW-STOCHASTIC W MATRIX ===")
         pd.set_option('display.max_columns', None)

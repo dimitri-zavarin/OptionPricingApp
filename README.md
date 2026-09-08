@@ -85,9 +85,9 @@ This prevents spurious empirical correlations that lack economic justification.
 
 **Interpretation**: The VAR(1) coefficient $A_1[i,j]$ represents the average effect of a 1-unit shock in asset $j$'s IV on asset $i$'s IV one step ahead, **subject to the structural constraint imposed by the skeleton**. This ensures:
 
-- ✅ Structural integrity: Only skeleton-approved relationships can have non-zero effects
-- ✅ Statistical grounding: Weights reflect actual historical IV spillover dynamics  
-- ✅ Simplicity: VAR is the standard econometric tool for multivariate time-series
+- Structural integrity: Only skeleton-approved relationships can have non-zero effects
+- Statistical grounding: Weights reflect actual historical IV spillover dynamics  
+- Simplicity: VAR is the standard econometric tool for multivariate time-series
 
 #### 2.2 Data Separation Rationale
 

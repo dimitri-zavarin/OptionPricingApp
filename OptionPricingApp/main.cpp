@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <cstdio>
 #include <Eigen/Dense>
+#include <fstream>
+#include <sstream>
 
 #include "simulation_config.h"
 #include "network_simulator.h"
@@ -55,7 +57,46 @@ void print_results(const std::string& regime_name,
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // Check if running in calibration mode
+    if (argc == 8) {
+        SimulationConfig config;
+        config.num_assets = 11;
+        config.num_paths = 100;
+        config.num_steps = 50;
+        config.dt = 1.0 / 252.0;
+        config.risk_free_rate = 0.04;
+        config.S0 = Eigen::VectorXd::Constant(11, 100.0);
+        config.q = Eigen::VectorXd::Zero(11);
+        config.kappa = Eigen::VectorXd::Constant(11, std::stod(argv[1]));
+        config.theta = Eigen::VectorXd::Constant(11, std::stod(argv[2]));
+        config.xi = Eigen::VectorXd::Constant(11, std::stod(argv[3]));
+        config.gamma = Eigen::VectorXd::Constant(11, std::stod(argv[4]));
+        config.rho = Eigen::VectorXd::Constant(11, std::stod(argv[5]));
+        config.L = Eigen::MatrixXd::Identity(11, 11);
+        config.W = Eigen::MatrixXd::Identity(11, 11) / 11.0;
+        config.tickers = {"AAPL", "CRUS", "SWKS", "BBY", "MU", "QRVO", "NVDA", "SMCI", "MPWR", "AVT", "AMAT"};
+        config.X0 = Eigen::VectorXd::Constant(11, -3.2);
+
+        double strike = std::stod(argv[6]);
+        double maturity = std::stod(argv[7]);
+
+        // Run simulation
+        SimulationResults results = SimulationRunner::run_simulation(config, strike, maturity, 42, false);
+        
+        // Output CSV
+        std::cout << "ASSET,EU_CALL,EU_PUT,AM_CALL,AM_PUT\n";
+        for (int i = 0; i < 11; ++i) {
+            std::cout << i << ","
+                      << results.european_call_prices(i) << ","
+                      << results.european_put_prices(i) << ","
+                      << results.american_call_prices(i) << ","
+                      << results.american_put_prices(i) << "\n";
+        }
+        
+        return 0;
+    }
+    
     std::cout << "=================================================================\n";
     std::cout << "          SPATIOTEMPORAL GRAPH LAPLACIAN ANALYSIS\n";
     std::cout << "       (11-NODE TECH SUPPLY CHAIN W/ CSV MATRIX LOADING)\n";
